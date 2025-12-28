@@ -4,8 +4,8 @@ Debug script to show raw snapshot data
 """
 
 import sys
-from ipcom_tcp_client import IPComClient
 import time
+from ipcom.ipcom_tcp_client import IPComClient
 
 # Configure stdout for UTF-8 on Windows
 if sys.platform == 'win32':

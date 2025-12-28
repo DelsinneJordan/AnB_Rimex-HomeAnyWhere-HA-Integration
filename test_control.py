@@ -3,9 +3,9 @@
 Test device control - turn a device ON and OFF.
 """
 
-from ipcom_tcp_client import IPComClient
-import time
 import sys
+import time
+from ipcom.ipcom_tcp_client import IPComClient
 
 sys.stdout.reconfigure(line_buffering=True)
 
