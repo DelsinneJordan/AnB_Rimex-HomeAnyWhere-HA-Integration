@@ -606,6 +606,7 @@ Device names are defined in devices.yaml
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
     # Import IPComClient AFTER logging is configured
+    # Note: ipcom_tcp_client is in the same directory (ipcom/)
     from ipcom_tcp_client import IPComClient
 
     # Validate arguments
