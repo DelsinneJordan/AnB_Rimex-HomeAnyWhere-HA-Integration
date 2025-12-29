@@ -4,7 +4,7 @@ This config flow allows users to set up the integration entirely via the UI,
 without editing configuration.yaml.
 
 Flow Steps:
-    1. User provides CLI path, host, port
+    1. User provides CLI path, host, port, scan_interval
     2. Validation: Check CLI exists and can connect
     3. Create config entry with validated data
 
@@ -22,7 +22,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST, CONF_PORT, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 import homeassistant.helpers.config_validation as cv
@@ -31,7 +31,9 @@ from .const import (
     CONF_CLI_PATH,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    JSON_CONTRACT_VERSION,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,10 +46,10 @@ def validate_cli_path(cli_path: str) -> str:
     """Validate that CLI path exists and is accessible.
 
     Args:
-        cli_path: Path to ipcom_cli.py directory (absolute or relative to /config)
+        cli_path: Path to ipcom_cli.py (absolute or relative to /config)
 
     Returns:
-        Absolute path to CLI directory if valid
+        Absolute path to CLI if valid
 
     Raises:
         ValueError: If CLI path doesn't exist or isn't accessible
@@ -62,18 +64,13 @@ def validate_cli_path(cli_path: str) -> str:
     # Normalize path
     cli_path = os.path.normpath(cli_path)
 
-    # Check if directory exists
+    # Check if file exists
     if not os.path.exists(cli_path):
-        raise ValueError(f"CLI directory not found at: {cli_path}")
-
-    # Check if ipcom_cli.py exists in directory
-    cli_script = os.path.join(cli_path, "ipcom_cli.py")
-    if not os.path.exists(cli_script):
-        raise ValueError(f"ipcom_cli.py not found in directory: {cli_path}")
+        raise ValueError(f"CLI script not found at: {cli_path}")
 
     # Check if file is readable
-    if not os.access(cli_script, os.R_OK):
-        raise ValueError(f"CLI script is not readable: {cli_script}")
+    if not os.access(cli_path, os.R_OK):
+        raise ValueError(f"CLI script is not readable: {cli_path}")
 
     return cli_path
 
@@ -88,7 +85,7 @@ async def validate_cli_connection(
 
     Args:
         hass: Home Assistant instance
-        cli_path: Absolute path to CLI directory
+        cli_path: Absolute path to CLI
         host: IPCom host
         port: IPCom port
 
@@ -100,10 +97,9 @@ async def validate_cli_connection(
     Raises:
         ValueError: If CLI fails, returns invalid JSON, or contract is wrong
     """
-    cli_script = os.path.join(cli_path, "ipcom_cli.py")
     cmd = [
         "python",
-        cli_script,
+        cli_path,
         "status",
         "--json",
         "--host",
@@ -112,8 +108,11 @@ async def validate_cli_connection(
         str(port),
     ]
 
+    # Get CLI directory (so dependencies can be found)
+    cli_dir = os.path.dirname(cli_path)
+
     _LOGGER.debug("Validating CLI connection: %s", " ".join(cmd))
-    _LOGGER.debug("CLI working directory: %s", cli_path)
+    _LOGGER.debug("CLI working directory: %s", cli_dir)
 
     def _run_cli():
         """Run CLI command synchronously (blocking)."""
@@ -123,7 +122,7 @@ async def validate_cli_connection(
             text=True,
             check=True,
             timeout=30,
-            cwd=cli_path,  # Set working directory to CLI location
+            cwd=cli_dir,  # Set working directory to CLI location
         )
 
     try:
@@ -182,7 +181,7 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for IPCom integration.
 
     This config flow:
-    - Presents a form to the user for CLI path, host, port
+    - Presents a form to the user for CLI path, host, port, scan_interval
     - Validates the CLI path exists
     - Validates the CLI can connect to IPCom
     - Creates a config entry with the validated data
@@ -231,6 +230,7 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_CLI_PATH: cli_path,  # Store absolute path
                         CONF_HOST: user_input[CONF_HOST],
                         CONF_PORT: user_input[CONF_PORT],
+                        CONF_SCAN_INTERVAL: user_input[CONF_SCAN_INTERVAL],
                     },
                 )
 
@@ -259,7 +259,7 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required(
                     CONF_CLI_PATH,
-                    description={"suggested_value": "ipcom"},
+                    description={"suggested_value": "ipcom/ipcom_cli.py"},
                 ): cv.string,
                 vol.Required(
                     CONF_HOST,
@@ -269,6 +269,10 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_PORT,
                     default=DEFAULT_PORT,
                 ): cv.port,
+                vol.Required(
+                    CONF_SCAN_INTERVAL,
+                    default=DEFAULT_SCAN_INTERVAL,
+                ): cv.positive_int,
             }
         )
 
@@ -330,5 +334,6 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_CLI_PATH: cli_path,
                 CONF_HOST: import_data[CONF_HOST],
                 CONF_PORT: import_data[CONF_PORT],
+                CONF_SCAN_INTERVAL: import_data[CONF_SCAN_INTERVAL],
             },
         )

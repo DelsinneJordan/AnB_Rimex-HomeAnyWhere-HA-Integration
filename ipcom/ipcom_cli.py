@@ -5,23 +5,18 @@ Home Anywhere Blue - IPCom CLI
 Human-friendly command-line interface for IPCom device control.
 
 Commands:
-  status                  - Show full system state
-  on <name>               - Turn device ON
-  off <name>              - Turn device OFF
-  toggle <name>           - Toggle device state
-  dim <name> <0-100>      - Set dimmer level (percentage)
-  watch                   - Live monitoring with device names
-  cover_open <name>       - Open shutter/cover (safe dual-relay)
-  cover_close <name>      - Close shutter/cover (safe dual-relay)
-  cover_stop <name>       - Stop shutter/cover movement
+  status              - Show full system state
+  on <name>           - Turn device ON
+  off <name>          - Turn device OFF
+  toggle <name>       - Toggle device state
+  dim <name> <0-100>  - Set dimmer level (percentage)
+  watch               - Live monitoring with device names
 
 Examples:
   python ipcom_cli.py status
   python ipcom_cli.py on keuken
   python ipcom_cli.py dim salon 40
   python ipcom_cli.py watch
-  python ipcom_cli.py cover_open rolluik_sal_links_m
-  python ipcom_cli.py cover_stop rolluik_sal_links_m
 """
 
 import sys
@@ -343,6 +338,7 @@ def control_device(client: "IPComClient", mapper: DeviceMapper, name: str, actio
         return False
 
 
+<<<<<<< HEAD
 class ShutterSafetyManager:
     """Manages per-shutter safety timers to prevent relays staying ON indefinitely.
 
@@ -661,6 +657,8 @@ def control_cover(client: "IPComClient", mapper: DeviceMapper, name: str, action
         return False
 
 
+=======
+>>>>>>> parent of 199b32a (DEBUG)
 def watch_mode(client: "IPComClient", mapper: DeviceMapper):
     """Live monitoring with device names."""
     print("\n" + "=" * 60)
@@ -905,14 +903,12 @@ Examples:
   %(prog)s toggle eetkamer           Toggle dining room light
   %(prog)s dim salon 40              Dim living room to 40%%
   %(prog)s watch                     Live monitoring mode
-  %(prog)s cover_open rolluik_sal_links_m    Open living room left shutter
-  %(prog)s cover_stop rolluik_sal_links_m    Stop shutter movement
 
 Device names are defined in devices.yaml
         """
     )
 
-    parser.add_argument('command', choices=['status', 'on', 'off', 'toggle', 'dim', 'watch', 'cover_open', 'cover_close', 'cover_stop'],
+    parser.add_argument('command', choices=['status', 'on', 'off', 'toggle', 'dim', 'watch'],
                         help='Command to execute')
     parser.add_argument('device', nargs='?', help='Device name (from devices.yaml)')
     parser.add_argument('value', nargs='?', type=int, help='Dimmer value (0-100) for dim command')
@@ -1019,21 +1015,6 @@ Device names are defined in devices.yaml
 
         elif args.command == 'dim':
             success = control_device(client, mapper, args.device, args.command, args.value)
-            if not success:
-                return 1
-
-        elif args.command == 'cover_open':
-            success = control_cover(client, mapper, args.device, 'open')
-            if not success:
-                return 1
-
-        elif args.command == 'cover_close':
-            success = control_cover(client, mapper, args.device, 'close')
-            if not success:
-                return 1
-
-        elif args.command == 'cover_stop':
-            success = control_cover(client, mapper, args.device, 'stop')
             if not success:
                 return 1
 
