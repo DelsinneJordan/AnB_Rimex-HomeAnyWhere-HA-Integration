@@ -101,10 +101,13 @@ class IPComCoordinator(DataUpdateCoordinator):
                     }
 
                     # Trigger coordinator update without fetching (data is already fresh)
-                    self.async_set_updated_data(self._latest_data)
+                    # Schedule the update in the event loop
+                    self.hass.loop.call_soon_threadsafe(
+                        lambda: self.async_set_updated_data(self._latest_data)
+                    )
 
                 except Exception as e:
-                    _LOGGER.error(f"Error processing snapshot callback: {e}")
+                    _LOGGER.error(f"Error processing snapshot callback: {e}", exc_info=True)
 
             self._client.on_state_snapshot(on_snapshot)
 
@@ -215,14 +218,16 @@ class IPComCoordinator(DataUpdateCoordinator):
         if not self._client or not self._client.is_connected():
             raise UpdateFailed("Persistent connection not established")
 
-        # Wait briefly for snapshot
-        import time
-        for _ in range(5):  # Wait up to 0.5 seconds
+        # Wait for first snapshot (give it up to 2 seconds on first load)
+        _LOGGER.debug("Waiting for first snapshot from persistent connection...")
+        for i in range(20):  # Wait up to 2 seconds (20 * 0.1s)
             if self._latest_data:
+                _LOGGER.debug(f"Received first snapshot after {(i+1)*0.1:.1f}s")
                 return self._latest_data
             await asyncio.sleep(0.1)
 
-        raise UpdateFailed("No snapshot data available yet")
+        # Still no data - this is an error
+        raise UpdateFailed("No snapshot data received after 2 seconds. Check connection to device.")
 
     async def async_execute_command(
         self, device_key: str, command: str, value: int | None = None

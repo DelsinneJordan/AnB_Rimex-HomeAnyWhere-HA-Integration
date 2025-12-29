@@ -8,7 +8,10 @@
           "cli_path": "Path to ipcom_cli.py (absolute or relative to config directory)",
           "host": "IPCom host address",
           "port": "IPCom port",
-          "scan_interval": "Update interval (seconds)"
+          "scan_interval": "Fallback interval (seconds) - actual updates occur every 350ms via persistent connection"
+        },
+        "data_description": {
+          "scan_interval": "This is only used as a fallback if the persistent connection fails. Real-time updates happen every 350ms automatically."
         }
       }
     },

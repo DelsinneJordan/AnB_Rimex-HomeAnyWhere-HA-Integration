@@ -1316,6 +1316,9 @@ class IPComClient:
         self._persistent_mode = False
         self._shutdown_event.set()
 
+        # Give threads a moment to see the shutdown signal
+        time.sleep(0.1)
+
         # Wait for threads to finish (with timeout)
         for thread in [
             self._keepalive_thread,
@@ -1326,7 +1329,7 @@ class IPComClient:
             if thread and thread.is_alive():
                 thread.join(timeout=2.0)
 
-        # Disconnect
+        # Disconnect (threads should have stopped by now)
         self.disconnect()
 
         self.logger.info("Persistent connection stopped")
@@ -1502,14 +1505,17 @@ class IPComClient:
                 # Timeout is normal, just continue
                 continue
             except socket.error as e:
-                self.logger.error(f"Socket error in receive loop: {e}")
+                # Ignore errors if we're shutting down
+                if self._persistent_mode and self._connected:
+                    self.logger.error(f"Socket error in receive loop: {e}")
                 self._cleanup_socket()
-                if not auto_reconnect:
+                if not auto_reconnect or not self._persistent_mode:
                     break
             except Exception as e:
-                self.logger.error(f"Unexpected error in receive loop: {e}", exc_info=True)
+                if self._persistent_mode:  # Only log if not shutting down
+                    self.logger.error(f"Unexpected error in receive loop: {e}", exc_info=True)
                 self._cleanup_socket()
-                if not auto_reconnect:
+                if not auto_reconnect or not self._persistent_mode:
                     break
 
         self.logger.debug("Receive loop stopped (persistent mode)")
