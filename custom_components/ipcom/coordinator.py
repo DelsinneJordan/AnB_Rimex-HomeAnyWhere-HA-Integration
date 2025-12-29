@@ -119,12 +119,20 @@ class IPComCoordinator(DataUpdateCoordinator):
                     }
 
                     # Trigger coordinator update without fetching (data is already fresh)
-                    # async_set_updated_data is synchronous despite its name - just call it
-                    _LOGGER.critical("📡 Updating coordinator data via call_soon_threadsafe")
-                    self.hass.loop.call_soon_threadsafe(
-                        self.async_set_updated_data, self._latest_data
-                    )
-                    _LOGGER.critical("📡 Coordinator update completed")
+                    # We need to update data AND notify listeners
+                    def update_and_notify():
+                        """Update data and notify all listening entities."""
+                        _LOGGER.critical("📡 Setting coordinator data")
+                        # Set the data on the coordinator
+                        self.data = self._latest_data
+                        self.last_update_success = True
+                        # Notify all entities that data has changed
+                        _LOGGER.critical("📡 Notifying %d listeners", len(self._listeners))
+                        self.async_update_listeners()
+                        _LOGGER.critical("📡 Listeners notified")
+
+                    self.hass.loop.call_soon_threadsafe(update_and_notify)
+                    _LOGGER.critical("📡 Update scheduled")
 
                 except Exception as e:
                     _LOGGER.error(f"Error processing snapshot callback: {e}", exc_info=True)
