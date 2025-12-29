@@ -74,18 +74,28 @@ class IPComCoordinator(DataUpdateCoordinator):
         Returns:
             True if connection started successfully, False otherwise
         """
+        _LOGGER.critical("coordinator.async_start() CALLED")
         try:
             # Import IPCom modules dynamically
+            _LOGGER.critical("Importing IPCom modules from: %s", self.cli_path)
             cli_dir = os.path.dirname(self.cli_path)
+            _LOGGER.critical("CLI dir: %s", cli_dir)
             if cli_dir not in sys.path:
                 sys.path.insert(0, cli_dir)
+                _LOGGER.critical("Added to sys.path")
 
+            _LOGGER.critical("Importing IPComClient...")
             from ipcom_tcp_client import IPComClient
+            _LOGGER.critical("Importing DeviceMapper...")
             from ipcom_cli import DeviceMapper
+            _LOGGER.critical("Imports successful")
 
             # Create client and mapper
+            _LOGGER.critical("Creating IPComClient...")
             self._client = IPComClient(host=self.host, port=self.port, debug=False)
+            _LOGGER.critical("Creating DeviceMapper...")
             self._device_mapper = DeviceMapper()
+            _LOGGER.critical("Client and mapper created")
 
             # Register callback for state updates
             def on_snapshot(snapshot):
