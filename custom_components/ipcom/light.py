@@ -143,30 +143,39 @@ class IPComLight(CoordinatorEntity, LightEntity):
 
         # Use state field from CLI JSON contract
         state = device_data.get("state", "off")
-        _LOGGER.debug("Light %s: state=%s (value=%s)", self._device_key, state, device_data.get("value"))
-        return state == "on"
+        result = state == "on"
+        # Log first time or when state changes
+        if not hasattr(self, "_last_state") or self._last_state != result:
+            self._last_state = result
+            _LOGGER.critical("💡 Light %s: is_on=%s (state='%s', value=%s)",
+                           self._device_key, result, state, device_data.get("value"))
+        return result
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the light on via CLI."""
-        _LOGGER.debug("Turning on %s", self._device_key)
+        _LOGGER.critical("🔆 TURN ON command received for %s", self._device_key)
 
         success = await self.coordinator.async_execute_command(
             self._device_key, "on"
         )
 
-        if not success:
-            _LOGGER.error("Failed to turn on %s", self._device_key)
+        if success:
+            _LOGGER.critical("🔆 TURN ON command succeeded for %s", self._device_key)
+        else:
+            _LOGGER.critical("❌ TURN ON command FAILED for %s", self._device_key)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the light off via CLI."""
-        _LOGGER.debug("Turning off %s", self._device_key)
+        _LOGGER.critical("🌙 TURN OFF command received for %s", self._device_key)
 
         success = await self.coordinator.async_execute_command(
             self._device_key, "off"
         )
 
-        if not success:
-            _LOGGER.error("Failed to turn off %s", self._device_key)
+        if success:
+            _LOGGER.critical("🌙 TURN OFF command succeeded for %s", self._device_key)
+        else:
+            _LOGGER.critical("❌ TURN OFF command FAILED for %s", self._device_key)
 
 
 class IPComDimmableLight(IPComLight):
@@ -230,8 +239,8 @@ class IPComDimmableLight(IPComLight):
             if cli_brightness == 0:
                 cli_brightness = 1
 
-            _LOGGER.debug(
-                "Setting %s brightness to %d%% (HA: %d)",
+            _LOGGER.critical(
+                "💡 DIM command received for %s: brightness=%d%% (HA: %d/255)",
                 self._device_key,
                 cli_brightness,
                 ha_brightness,
@@ -241,8 +250,11 @@ class IPComDimmableLight(IPComLight):
                 self._device_key, "dim", cli_brightness
             )
 
-            if not success:
-                _LOGGER.error("Failed to set brightness for %s", self._device_key)
+            if success:
+                _LOGGER.critical("💡 DIM command succeeded for %s", self._device_key)
+            else:
+                _LOGGER.critical("❌ DIM command FAILED for %s", self._device_key)
         else:
             # No brightness specified, just turn on
+            _LOGGER.critical("💡 Dimmer %s turning on without brightness (using parent)", self._device_key)
             await super().async_turn_on(**kwargs)

@@ -119,12 +119,19 @@ class IPComCoordinator(DataUpdateCoordinator):
                     }
 
                     # Trigger coordinator update without fetching (data is already fresh)
-                    # Schedule the update in the event loop
-                    _LOGGER.debug("Scheduling coordinator update via call_soon_threadsafe")
-                    self.hass.loop.call_soon_threadsafe(
-                        lambda: self.async_set_updated_data(self._latest_data)
-                    )
-                    _LOGGER.debug("Coordinator update scheduled successfully")
+                    # Schedule the update in the event loop (async_set_updated_data is a coroutine)
+                    _LOGGER.critical("📡 Scheduling coordinator update via call_soon_threadsafe")
+
+                    # We need to schedule a coroutine from a worker thread
+                    # Use asyncio.run_coroutine_threadsafe or create_task via call_soon_threadsafe
+                    def schedule_update():
+                        import asyncio
+                        asyncio.create_task(
+                            self.async_set_updated_data(self._latest_data)
+                        )
+
+                    self.hass.loop.call_soon_threadsafe(schedule_update)
+                    _LOGGER.critical("📡 Coordinator update scheduled successfully")
 
                 except Exception as e:
                     _LOGGER.error(f"Error processing snapshot callback: {e}", exc_info=True)
@@ -314,29 +321,31 @@ class IPComCoordinator(DataUpdateCoordinator):
 
             # Execute command based on type
             if command == "on":
-                _LOGGER.debug(f"Queuing ON command for {device_key} (M{module}O{output})")
+                _LOGGER.critical(f"📤 Queuing ON command for {device_key} (M{module}O{output})")
                 await self.hass.async_add_executor_job(
                     self._client.queue_command,
                     self._client.turn_on,
                     module,
                     output
                 )
+                _LOGGER.critical(f"✅ ON command queued for {device_key}")
 
             elif command == "off":
-                _LOGGER.debug(f"Queuing OFF command for {device_key} (M{module}O{output})")
+                _LOGGER.critical(f"📤 Queuing OFF command for {device_key} (M{module}O{output})")
                 await self.hass.async_add_executor_job(
                     self._client.queue_command,
                     self._client.turn_off,
                     module,
                     output
                 )
+                _LOGGER.critical(f"✅ OFF command queued for {device_key}")
 
             elif command == "dim":
                 if value is None:
                     _LOGGER.error("Dim command requires value")
                     return False
 
-                _LOGGER.debug(f"Queuing DIM command for {device_key} (M{module}O{output}) to {value}%")
+                _LOGGER.critical(f"📤 Queuing DIM command for {device_key} (M{module}O{output}) to {value}%")
                 await self.hass.async_add_executor_job(
                     self._client.queue_command,
                     self._client.set_dimmer,
@@ -344,6 +353,7 @@ class IPComCoordinator(DataUpdateCoordinator):
                     output,
                     value
                 )
+                _LOGGER.critical(f"✅ DIM command queued for {device_key}")
 
             elif command == "toggle":
                 # Get current state
