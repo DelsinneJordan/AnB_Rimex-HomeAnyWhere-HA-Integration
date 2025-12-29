@@ -298,7 +298,7 @@ class IPComDualRelayCover(CoordinatorEntity, CoverEntity):
         """Open the cover (move UP).
 
         Behavior Sequence:
-        1. If DOWN relay is ON → turn it OFF (safety)
+        1. ALWAYS turn DOWN relay OFF (unconditional safety)
         2. Turn UP relay ON
 
         Target State: UP=1, DOWN=0
@@ -308,22 +308,21 @@ class IPComDualRelayCover(CoordinatorEntity, CoverEntity):
         """
         _LOGGER.debug("Opening cover %s", self._attr_name)
 
-        # SAFETY: Ensure DOWN relay is OFF before activating UP
-        down_state = self._get_relay_state(self._down_device_key)
-        if down_state > 0:
-            _LOGGER.debug(
-                "Safety: Turning OFF DOWN relay %s before opening",
+        # SAFETY: ALWAYS turn OFF DOWN relay before activating UP
+        # This is unconditional to prevent race conditions from rapid commands
+        _LOGGER.debug(
+            "Safety: Turning OFF DOWN relay %s before opening (unconditional)",
+            self._down_device_key
+        )
+        success = await self.coordinator.async_execute_command(
+            self._down_device_key, "off"
+        )
+        if not success:
+            _LOGGER.error(
+                "Failed to turn OFF DOWN relay %s, aborting open",
                 self._down_device_key
             )
-            success = await self.coordinator.async_execute_command(
-                self._down_device_key, "off"
-            )
-            if not success:
-                _LOGGER.error(
-                    "Failed to turn OFF DOWN relay %s, aborting open",
-                    self._down_device_key
-                )
-                return
+            return
 
         # Activate UP relay
         success = await self.coordinator.async_execute_command(
@@ -337,7 +336,7 @@ class IPComDualRelayCover(CoordinatorEntity, CoverEntity):
         """Close the cover (move DOWN).
 
         Behavior Sequence:
-        1. If UP relay is ON → turn it OFF (safety)
+        1. ALWAYS turn UP relay OFF (unconditional safety)
         2. Turn DOWN relay ON
 
         Target State: UP=0, DOWN=1
@@ -347,22 +346,21 @@ class IPComDualRelayCover(CoordinatorEntity, CoverEntity):
         """
         _LOGGER.debug("Closing cover %s", self._attr_name)
 
-        # SAFETY: Ensure UP relay is OFF before activating DOWN
-        up_state = self._get_relay_state(self._up_device_key)
-        if up_state > 0:
-            _LOGGER.debug(
-                "Safety: Turning OFF UP relay %s before closing",
+        # SAFETY: ALWAYS turn OFF UP relay before activating DOWN
+        # This is unconditional to prevent race conditions from rapid commands
+        _LOGGER.debug(
+            "Safety: Turning OFF UP relay %s before closing (unconditional)",
+            self._up_device_key
+        )
+        success = await self.coordinator.async_execute_command(
+            self._up_device_key, "off"
+        )
+        if not success:
+            _LOGGER.error(
+                "Failed to turn OFF UP relay %s, aborting close",
                 self._up_device_key
             )
-            success = await self.coordinator.async_execute_command(
-                self._up_device_key, "off"
-            )
-            if not success:
-                _LOGGER.error(
-                    "Failed to turn OFF UP relay %s, aborting close",
-                    self._up_device_key
-                )
-                return
+            return
 
         # Activate DOWN relay
         success = await self.coordinator.async_execute_command(
