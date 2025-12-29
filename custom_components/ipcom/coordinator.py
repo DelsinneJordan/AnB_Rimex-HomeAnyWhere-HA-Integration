@@ -231,6 +231,12 @@ class IPComCoordinator(DataUpdateCoordinator):
                     brightness = int((value / 255.0) * 100)
                 device_data["brightness"] = brightness
 
+            # Add cover-specific fields if present (for shutters)
+            if "relay_role" in device_info:
+                device_data["relay_role"] = device_info["relay_role"]
+            if "paired_device" in device_info:
+                device_data["paired_device"] = device_info["paired_device"]
+
             # Add to devices dict with composite key
             entity_key = f"{category}.{device_key}"
             devices[entity_key] = device_data
