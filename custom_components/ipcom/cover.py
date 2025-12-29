@@ -63,6 +63,21 @@ class IPComCover(CoordinatorEntity[IPComCoordinator], CoverEntity):
         self._attr_unique_id = f"ipcom_{self._device_key}"
         self._attr_name = device_data.get("display_name", self._device_key.upper())
 
+        # Store device metadata for device_info
+        self._module = device_data.get("module")
+        self._output = device_data.get("output")
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        """Return device information for grouping in HA UI."""
+        return {
+            "identifiers": {(DOMAIN, self._attr_unique_id)},
+            "name": self._attr_name,
+            "manufacturer": "Home Anywhere Blue",
+            "model": "IPCom Shutter",
+            "sw_version": f"Module {self._module}",
+        }
+
     @property
     def is_closed(self) -> bool | None:
         """Return if the cover is closed."""

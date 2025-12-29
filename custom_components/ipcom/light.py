@@ -59,6 +59,21 @@ class IPComLight(CoordinatorEntity[IPComCoordinator], LightEntity):
         self._attr_color_mode = ColorMode.ONOFF
         self._attr_supported_color_modes = {ColorMode.ONOFF}
 
+        # Store device metadata for device_info
+        self._module = device_data.get("module")
+        self._output = device_data.get("output")
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        """Return device information for grouping in HA UI."""
+        return {
+            "identifiers": {(DOMAIN, self._attr_unique_id)},
+            "name": self._attr_name,
+            "manufacturer": "Home Anywhere Blue",
+            "model": "IPCom Light",
+            "sw_version": f"Module {self._module}",
+        }
+
     @property
     def is_on(self) -> bool:
         """Return True if light is on."""
