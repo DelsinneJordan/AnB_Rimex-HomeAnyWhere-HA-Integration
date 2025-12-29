@@ -1,35 +1,21 @@
 """The IPCom Home Anywhere Blue integration.
 
 This integration provides a bridge between Home Assistant and the IPCom system
-using the CLI JSON interface as the ONLY communication method.
+using the persistent TCP connection with background loops.
 
 Architecture:
-    CLI (ipcom_cli.py) → JSON Contract → Home Assistant
-
-    This integration does NOT:
-    - Parse TCP packets
-    - Handle encryption
-    - Manage sockets
-    - Implement protocol logic
-
-    It ONLY:
-    - Calls CLI commands via subprocess
-    - Parses JSON responses
-    - Manages Home Assistant entities
+    IPComCoordinator → IPComClient (persistent) → TCP Socket → IPCom Device
 
 Configuration:
-    Since there is no config_flow yet, this integration must be configured
-    via YAML in configuration.yaml:
-
-    ipcom:
-      cli_path: "/path/to/ipcom_cli.py"
-      host: "megane-david.dyndns.info"
-      port: 5000
-      scan_interval: 10
+    Configured via UI (Settings → Devices & Services → Add Integration)
 """
 from __future__ import annotations
 
 import logging
+
+# Initialize logger FIRST before any other code
+_LOGGER = logging.getLogger(__name__)
+_LOGGER.info("IPCom __init__.py is being loaded")
 import os
 from pathlib import Path
 
@@ -47,8 +33,6 @@ from .const import (
     PLATFORMS,
 )
 from .coordinator import IPComCoordinator
-
-_LOGGER = logging.getLogger(__name__)
 
 # Configuration schema for YAML setup
 CONFIG_SCHEMA = vol.Schema(
@@ -127,11 +111,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Returns:
         True if setup succeeded, False otherwise
     """
+    _LOGGER.critical("=" * 80)
+    _LOGGER.critical("async_setup_entry CALLED - Integration is starting!")
+    _LOGGER.critical("Entry ID: %s", entry.entry_id)
+    _LOGGER.critical("Entry Data: %s", entry.data)
+    _LOGGER.critical("=" * 80)
+
     # Get configuration from entry
-    cli_path = entry.data["cli_path"]
-    host = entry.data.get(CONF_HOST, DEFAULT_HOST)
-    port = entry.data.get(CONF_PORT, DEFAULT_PORT)
-    scan_interval = entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    try:
+        cli_path = entry.data["cli_path"]
+        host = entry.data.get(CONF_HOST, DEFAULT_HOST)
+        port = entry.data.get(CONF_PORT, DEFAULT_PORT)
+        scan_interval = entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    except KeyError as e:
+        _LOGGER.error("Missing required config key: %s", e)
+        _LOGGER.error("Entry data: %s", entry.data)
+        return False
 
     _LOGGER.info(
         "Setting up IPCom integration: %s:%d (scan_interval=%ds, cli=%s)",
