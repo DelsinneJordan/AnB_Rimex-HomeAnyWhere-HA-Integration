@@ -36,12 +36,19 @@ async def async_setup_entry(
     entities = []
 
     if coordinator.data and "devices" in coordinator.data:
+        _LOGGER.critical("🔍 Light setup: Found %d total devices in coordinator", len(coordinator.data["devices"]))
+        # Log first few devices to see structure
+        for i, (key, data) in enumerate(list(coordinator.data["devices"].items())[:3]):
+            _LOGGER.critical("  Sample device %d: key='%s', category='%s', type='%s'",
+                           i, key, data.get("category"), data.get("type"))
+
         for entity_key, device_data in coordinator.data["devices"].items():
             category = device_data.get("category")
 
             # Only create entities for lights category
             if category == "lights":
                 device_type = device_data.get("type", "switch")
+                _LOGGER.critical("✅ Creating light entity: %s (type=%s)", entity_key, device_type)
 
                 if device_type == "dimmer":
                     entity = IPComDimmableLight(coordinator, entity_key, device_data)
@@ -51,10 +58,10 @@ async def async_setup_entry(
                 entities.append(entity)
 
     if entities:
-        _LOGGER.info("Adding %d light entities", len(entities))
+        _LOGGER.critical("🎉 Adding %d light entities to Home Assistant", len(entities))
         async_add_entities(entities)
     else:
-        _LOGGER.warning("No light entities found in coordinator data")
+        _LOGGER.critical("❌ No light entities found in coordinator data")
 
 
 class IPComLight(CoordinatorEntity, LightEntity):
