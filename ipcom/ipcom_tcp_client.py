@@ -1023,26 +1023,43 @@ class IPComClient:
             self.logger.debug(f"Set Module {module}, Output {output} to {value}")
 
     def turn_on(self, module: int, output: int, **kwargs) -> None:
-        """Turn output ON (255)."""
-        self.set_output(module, output, 255, **kwargs)
+        """Turn output ON (255).
+
+        Uses set_value() which preserves other outputs in the module.
+        """
+        # Module 6 (EXO DIM) uses 100 for full brightness, others use 255
+        value = 100 if module == 6 else 255
+        self.set_value(module, output, value)
 
     def turn_off(self, module: int, output: int, **kwargs) -> None:
-        """Turn output OFF (0)."""
-        self.set_output(module, output, 0, **kwargs)
+        """Turn output OFF (0).
+
+        Uses set_value() which preserves other outputs in the module.
+        """
+        self.set_value(module, output, 0)
 
     def set_dimmer(self, module: int, output: int, percentage: int, **kwargs) -> None:
         """
         Set dimmer to percentage (0-100).
 
+        Uses set_value() which preserves other outputs in the module.
+
         Args:
             percentage: Dimmer level 0-100
         """
-        from frame_builder import set_dimmer
+        if not (0 <= percentage <= 100):
+            raise ValueError(f"percentage must be 0-100, got {percentage}")
 
-        command = set_dimmer(module, output, percentage, **kwargs)
-        self.send_command(command)
+        # Module 6 (EXO DIM) uses 0-100 values directly
+        # Regular modules use 0-255 range
+        if module == 6:
+            value = percentage
+        else:
+            value = int((percentage / 100.0) * 255)
 
-    def set_value(self, module: int, output: int, value: int, bus: int = 1):
+        self.set_value(module, output, value)
+
+    def set_value(self, module: int, output: int, value: int, bus: int = 2):
         """
         Set output value (send write frame).
 
@@ -1054,7 +1071,7 @@ class IPComClient:
             module: Module number (1-16)
             output: Output number (1-8)
             value: New value (0-255)
-            bus: Bus number (default: 1)
+            bus: Bus number (default: 2, matches official app)
 
         Raises:
             ValueError: If parameters are out of range
@@ -1073,21 +1090,35 @@ class IPComClient:
         if not self._latest_snapshot:
             raise RuntimeError("No state snapshot available yet (need current values)")
 
-        # Get current module values
+        # Get current module values from snapshot
         values = self._latest_snapshot.get_module_values(module)
 
-        # Update target output
+        # Update target output while preserving others
         values[output - 1] = value
 
-        # Build frame data: [1, value1, value2, ..., value8]
-        data = bytes([1] + values)
+        # Use frame_builder to construct the proper command
+        from frame_builder import build_exo_set_values_frame, build_frame_request_command
 
         # Calculate module address: 60 + (module - 1)
         to_address = 60 + (module - 1)
 
-        # Send frame
+        # Build ExoSetValuesFrame
+        frame = build_exo_set_values_frame(
+            from_addr=0,
+            to_addr=to_address,
+            exo_number=module,
+            values=values,
+            bus_number=bus
+        )
+
+        # Wrap in FrameRequestCommand
+        command = build_frame_request_command(frame)
+
+        # Send command (will be encrypted by send_command)
         self.logger.info(f"Setting module {module} output {output} to {value}")
-        self.send_frame(to=to_address, from_=0, data=data)
+        if self.debug:
+            self.logger.debug(f"Sending values for module {module}: {values}")
+        self.send_command(command)
 
     def send_keepalive(self):
         """Send keepalive frame."""
