@@ -155,11 +155,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         scan_interval=scan_interval,
     )
 
-    # Fetch initial data
+    # Start persistent connection
+    try:
+        success = await coordinator.async_start()
+        if not success:
+            _LOGGER.error("Failed to start persistent connection")
+            return False
+    except Exception as err:
+        _LOGGER.error("Failed to start persistent connection: %s", err)
+        return False
+
+    # Wait briefly for initial data
     try:
         await coordinator.async_config_entry_first_refresh()
     except Exception as err:
         _LOGGER.error("Failed to fetch initial data from IPCom: %s", err)
+        await coordinator.async_stop()
         return False
 
     # Store coordinator
@@ -185,8 +196,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry.
 
-    This will be used when config_flow is implemented.
+    Stops the persistent connection and cleans up resources.
     """
+    # Get coordinator
+    entry_data = hass.data[DOMAIN].get(entry.entry_id)
+    if entry_data:
+        coordinator = entry_data.get("coordinator")
+        if coordinator:
+            # Stop persistent connection
+            await coordinator.async_stop()
+
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 

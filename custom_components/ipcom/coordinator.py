@@ -4,34 +4,36 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import subprocess
+import os
+import sys
 from datetime import timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CLI_PYTHON, CLI_SCRIPT, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class IPComCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching IPCom data from CLI JSON interface.
+    """Class to manage fetching IPCom data using persistent connection.
 
-    This coordinator is the ONLY interface to the IPCom system.
-    It consumes the stable CLI JSON contract (v1.0) and provides data to entities.
+    UPGRADED: Now uses persistent TCP connection with background loops instead of
+    subprocess calls. This matches the official HomeAnywhere app behavior.
 
-    The coordinator does NOT:
-    - Parse TCP packets
-    - Handle encryption
-    - Manage sockets
-    - Implement protocol logic
+    Architecture:
+    - Maintains a single persistent IPComClient instance
+    - Uses 3 background loops (keep-alive, status poll, command queue)
+    - Receives real-time state updates via callbacks
+    - No more connect-poll-disconnect overhead
 
-    It ONLY:
-    - Calls `ipcom_cli.py status --json`
-    - Parses the JSON response
-    - Provides structured data to entities
+    Benefits vs. old approach:
+    - 29× faster updates (350ms vs 10s)
+    - Real-time state changes
+    - Instant command execution
+    - Reduced CPU/network overhead
     """
 
     def __init__(
@@ -46,152 +48,189 @@ class IPComCoordinator(DataUpdateCoordinator):
 
         Args:
             hass: Home Assistant instance
-            cli_path: Path to ipcom_cli.py script
+            cli_path: Path to ipcom directory (for importing modules)
             host: IPCom server host
             port: IPCom server port
-            scan_interval: Update interval in seconds
+            scan_interval: Fallback update interval (persistent connection updates at 350ms)
         """
         self.cli_path = cli_path
         self.host = host
         self.port = port
+        self._client = None
+        self._device_mapper = None
+        self._latest_data = None
 
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
+            # Note: scan_interval is now just a fallback. Real updates happen at 350ms via callbacks
             update_interval=timedelta(seconds=scan_interval),
         )
 
-    async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from IPCom via CLI JSON interface.
+    async def async_start(self) -> bool:
+        """Start the persistent connection and background loops.
 
         Returns:
-            Dictionary with structure:
-            {
-                "timestamp": "ISO-8601 datetime",
-                "devices": {
-                    "<category>.<device_key>": {
-                        "device_key": str,
-                        "display_name": str,
-                        "category": str,
-                        "type": "dimmer" | "switch",
-                        "module": int,
-                        "output": int,
-                        "value": int (0-255),
-                        "state": "on" | "off",
-                        "brightness": int (0-100, only for dimmers)
-                    }
-                }
-            }
-
-        Raises:
-            UpdateFailed: If CLI command fails or returns invalid JSON
+            True if connection started successfully, False otherwise
         """
         try:
-            # Build CLI command
-            cmd = [
-                CLI_PYTHON,
-                self.cli_path,
-                "status",
-                "--json",
-                "--host",
-                self.host,
-                "--port",
-                str(self.port),
-            ]
+            # Import IPCom modules dynamically
+            cli_dir = os.path.dirname(self.cli_path)
+            if cli_dir not in sys.path:
+                sys.path.insert(0, cli_dir)
 
-            _LOGGER.debug("Running CLI command: %s", " ".join(cmd))
+            from ipcom_tcp_client import IPComClient
+            from ipcom_cli import DeviceMapper
 
-            # Run CLI command (blocking - run in executor)
-            result = await self.hass.async_add_executor_job(
-                self._run_cli_command, cmd
+            # Create client and mapper
+            self._client = IPComClient(host=self.host, port=self.port, debug=False)
+            self._device_mapper = DeviceMapper()
+
+            # Register callback for state updates
+            def on_snapshot(snapshot):
+                """Handle state snapshot updates from background loop."""
+                try:
+                    # Convert snapshot to device data
+                    devices_data = self._snapshot_to_devices(snapshot)
+
+                    # Store latest data
+                    self._latest_data = {
+                        "timestamp": snapshot.timestamp_iso,
+                        "devices": devices_data
+                    }
+
+                    # Trigger coordinator update without fetching (data is already fresh)
+                    self.async_set_updated_data(self._latest_data)
+
+                except Exception as e:
+                    _LOGGER.error(f"Error processing snapshot callback: {e}")
+
+            self._client.on_state_snapshot(on_snapshot)
+
+            # Start persistent connection in executor (blocking call)
+            success = await self.hass.async_add_executor_job(
+                self._client.start_persistent_connection,
+                True  # auto_reconnect
             )
 
-            # Parse JSON response
-            try:
-                data = json.loads(result.stdout)
-            except json.JSONDecodeError as err:
-                _LOGGER.error("Invalid JSON from CLI: %s", result.stdout[:200])
-                raise UpdateFailed(f"Invalid JSON from CLI: {err}") from err
+            if success:
+                _LOGGER.info(
+                    "Persistent connection started: %s:%d (updates every 350ms)",
+                    self.host,
+                    self.port
+                )
+            else:
+                _LOGGER.error("Failed to start persistent connection")
 
-            # Check for error response
-            if "error" in data:
-                error_msg = data.get("error", "Unknown error")
-                _LOGGER.error("CLI returned error: %s", error_msg)
-                raise UpdateFailed(f"CLI error: {error_msg}")
+            return success
 
-            # Validate response structure
-            if "devices" not in data or "timestamp" not in data:
-                _LOGGER.error("Invalid CLI response structure: %s", list(data.keys()))
-                raise UpdateFailed("Invalid CLI response: missing required fields")
+        except Exception as e:
+            _LOGGER.error(f"Error starting persistent connection: {e}", exc_info=True)
+            return False
 
-            # Transform device list into dict keyed by "<category>.<device_key>"
-            devices = {}
-            for device in data["devices"]:
-                device_key = device.get("device_key")
-                category = device.get("category")
-
-                if not device_key or not category:
-                    _LOGGER.warning("Device missing key or category: %s", device)
-                    continue
-
-                entity_key = f"{category}.{device_key}"
-                devices[entity_key] = device
-
-            _LOGGER.debug(
-                "Coordinator update successful: %d devices at %s",
-                len(devices),
-                data.get("timestamp"),
+    async def async_stop(self):
+        """Stop the persistent connection and cleanup."""
+        if self._client:
+            _LOGGER.info("Stopping persistent connection...")
+            await self.hass.async_add_executor_job(
+                self._client.stop_persistent_connection
             )
+            self._client = None
 
-            return {
-                "timestamp": data["timestamp"],
-                "devices": devices,
-            }
-
-        except subprocess.CalledProcessError as err:
-            _LOGGER.error(
-                "CLI command failed (exit %d): %s",
-                err.returncode,
-                err.stderr[:200] if err.stderr else "no stderr",
-            )
-            raise UpdateFailed(f"CLI command failed: {err}") from err
-
-        except Exception as err:
-            _LOGGER.error("Unexpected error updating IPCom data: %s", err)
-            raise UpdateFailed(f"Unexpected error: {err}") from err
-
-    def _run_cli_command(self, cmd: list[str]) -> subprocess.CompletedProcess:
-        """Run CLI command synchronously (called via executor).
+    def _snapshot_to_devices(self, snapshot) -> dict:
+        """Convert StateSnapshot to devices dict.
 
         Args:
-            cmd: Command list to execute
+            snapshot: StateSnapshot object
 
         Returns:
-            Completed process with stdout/stderr
-
-        Raises:
-            subprocess.CalledProcessError: If command fails
+            Dict mapping "category.device_key" to device data
         """
-        import os
+        from models import StateSnapshot
 
-        # Get CLI directory to set as working directory
-        cli_dir = os.path.dirname(self.cli_path)
+        devices = {}
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,  # 30 second timeout
-            cwd=cli_dir,  # Set working directory to CLI location
-        )
-        return result
+        # Iterate through all mapped devices
+        for device_key, device_info in self._device_mapper.devices.items():
+            module = device_info["module"]
+            output = device_info["output"]
+            category = device_info["category"]
+            device_type = device_info["type"]
+
+            # Get value from snapshot
+            value = snapshot.get_value(module, output)
+            if value is None:
+                continue
+
+            # Determine state
+            state = "on" if value > 0 else "off"
+
+            # Build device data
+            device_data = {
+                "device_key": device_key,
+                "display_name": device_info["display_name"],
+                "category": category,
+                "type": device_type,
+                "module": module,
+                "output": output,
+                "value": value,
+                "state": state,
+            }
+
+            # Add brightness for dimmers
+            if device_type == "dimmer":
+                # Module 6 (EXO DIM) uses 0-100, others use 0-255
+                if module == 6:
+                    brightness = value
+                else:
+                    brightness = int((value / 255.0) * 100)
+                device_data["brightness"] = brightness
+
+            # Add to devices dict with composite key
+            entity_key = f"{category}.{device_key}"
+            devices[entity_key] = device_data
+
+        return devices
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from IPCom (fallback only - real updates via callbacks).
+
+        In persistent connection mode, this method is rarely called because
+        state updates happen automatically via the 350ms polling loop callback.
+
+        This method only serves as a fallback if:
+        1. The persistent connection hasn't started yet
+        2. The connection is temporarily down
+        3. Manual refresh is requested
+
+        Returns:
+            Dictionary with device data, or raises UpdateFailed
+        """
+        # If we have recent data from callback, return it
+        if self._latest_data:
+            return self._latest_data
+
+        # No data available yet
+        if not self._client or not self._client.is_connected():
+            raise UpdateFailed("Persistent connection not established")
+
+        # Wait briefly for snapshot
+        import time
+        for _ in range(5):  # Wait up to 0.5 seconds
+            if self._latest_data:
+                return self._latest_data
+            await asyncio.sleep(0.1)
+
+        raise UpdateFailed("No snapshot data available yet")
 
     async def async_execute_command(
         self, device_key: str, command: str, value: int | None = None
     ) -> bool:
-        """Execute a control command via CLI.
+        """Execute a control command via persistent connection.
+
+        Commands are queued and executed by the command queue loop,
+        which automatically pauses status polling during execution.
 
         Args:
             device_key: Device identifier (e.g., "keuken")
@@ -201,51 +240,90 @@ class IPComCoordinator(DataUpdateCoordinator):
         Returns:
             True if command succeeded, False otherwise
         """
-        try:
-            # Build command
-            cmd = [
-                CLI_PYTHON,
-                self.cli_path,
-                command,
-                device_key,
-            ]
-
-            # Add value for dim command (must come after device_key)
-            if command == "dim" and value is not None:
-                cmd.append(str(value))  # Append after device_key
-
-            # Add connection parameters
-            cmd.extend([
-                "--host",
-                self.host,
-                "--port",
-                str(self.port),
-            ])
-
-            _LOGGER.debug("Executing command: %s", " ".join(cmd))
-
-            # Run command
-            result = await self.hass.async_add_executor_job(
-                self._run_cli_command, cmd
-            )
-
-            _LOGGER.debug("Command successful: %s", result.stdout.strip())
-
-            # Don't force immediate refresh - let the regular polling cycle update state
-            # This prevents commands from blocking each other (Issue #2: roller shutters)
-            # The TCP client maintains state internally, so the next poll will reflect changes
-            # await self.async_request_refresh()  # REMOVED to fix concurrent operations
-
-            return True
-
-        except subprocess.CalledProcessError as err:
-            _LOGGER.error(
-                "Command failed (exit %d): %s",
-                err.returncode,
-                err.stderr[:200] if err.stderr else "no stderr",
-            )
+        if not self._client or not self._client.is_connected():
+            _LOGGER.error("Cannot execute command: not connected")
             return False
 
+        if not self._device_mapper:
+            _LOGGER.error("Cannot execute command: device mapper not initialized")
+            return False
+
+        try:
+            # Get device info from mapper
+            device_info = self._device_mapper.get_device(device_key)
+            if not device_info:
+                _LOGGER.error(f"Device not found: {device_key}")
+                return False
+
+            module = device_info["module"]
+            output = device_info["output"]
+
+            # Execute command based on type
+            if command == "on":
+                _LOGGER.debug(f"Queuing ON command for {device_key} (M{module}O{output})")
+                await self.hass.async_add_executor_job(
+                    self._client.queue_command,
+                    self._client.turn_on,
+                    module,
+                    output
+                )
+
+            elif command == "off":
+                _LOGGER.debug(f"Queuing OFF command for {device_key} (M{module}O{output})")
+                await self.hass.async_add_executor_job(
+                    self._client.queue_command,
+                    self._client.turn_off,
+                    module,
+                    output
+                )
+
+            elif command == "dim":
+                if value is None:
+                    _LOGGER.error("Dim command requires value")
+                    return False
+
+                _LOGGER.debug(f"Queuing DIM command for {device_key} (M{module}O{output}) to {value}%")
+                await self.hass.async_add_executor_job(
+                    self._client.queue_command,
+                    self._client.set_dimmer,
+                    module,
+                    output,
+                    value
+                )
+
+            elif command == "toggle":
+                # Get current state
+                current_value = self._client.get_value(module, output)
+                if current_value is None:
+                    _LOGGER.error(f"Cannot toggle: no current state for {device_key}")
+                    return False
+
+                # Toggle
+                if current_value > 0:
+                    _LOGGER.debug(f"Toggling {device_key} OFF (current: {current_value})")
+                    await self.hass.async_add_executor_job(
+                        self._client.queue_command,
+                        self._client.turn_off,
+                        module,
+                        output
+                    )
+                else:
+                    _LOGGER.debug(f"Toggling {device_key} ON (current: {current_value})")
+                    await self.hass.async_add_executor_job(
+                        self._client.queue_command,
+                        self._client.turn_on,
+                        module,
+                        output
+                    )
+
+            else:
+                _LOGGER.error(f"Unknown command: {command}")
+                return False
+
+            # Command queued successfully
+            # State will update automatically via 350ms polling loop callback
+            return True
+
         except Exception as err:
-            _LOGGER.error("Unexpected error executing command: %s", err)
+            _LOGGER.error(f"Error executing command: {err}", exc_info=True)
             return False
