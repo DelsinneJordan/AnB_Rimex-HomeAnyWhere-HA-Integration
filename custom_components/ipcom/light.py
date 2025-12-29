@@ -92,6 +92,16 @@ class IPComLight(CoordinatorEntity, LightEntity):
         self._attr_supported_color_modes = {ColorMode.ONOFF}
 
     @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data is not None
+            and "devices" in self.coordinator.data
+            and self._entity_key in self.coordinator.data["devices"]
+        )
+
+    @property
     def device_info(self) -> dict[str, Any]:
         """Return device information."""
         return {
