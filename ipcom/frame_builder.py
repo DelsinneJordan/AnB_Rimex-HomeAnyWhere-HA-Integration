@@ -104,6 +104,18 @@ def set_output(
     """
     Build command to set a single output value.
 
+    ⚠️ WARNING - DEPRECATED: This function has a critical bug!
+    ==========================================
+    This function sends [0,0,0,0,0,0,0,0] for all outputs except the target,
+    which TURNS OFF all other outputs in the module!
+
+    DO NOT USE THIS FUNCTION. Use IPComClient.set_value() instead, which:
+    1. Reads current state from StateSnapshot
+    2. Modifies only the target output
+    3. Sends all 8 values preserving others
+
+    This matches the official app behavior (see reverse engineering findings).
+
     Args:
         module: Module number (1-16)
         output: Output number (1-8)
@@ -121,11 +133,9 @@ def set_output(
     if not (0 <= value <= 255):
         raise ValueError(f"value must be 0-255, got {value}")
 
-    # We need to send values for ALL 8 outputs in the module
-    # So we need to get current state first, or send zeros for others
-    # For now, we'll set the target output and leave others at 0
-    # TODO: Get current state and preserve other outputs
-
+    # ❌ BUG: Creates array of zeros, turning off all other outputs!
+    # This causes Issue #1: "Turning on one light turns off previously active light"
+    # The official app maintains module state and modifies only the target output.
     values = [0] * 8
     values[output - 1] = value
 
@@ -149,6 +159,8 @@ def turn_on(module: int, output: int, **kwargs) -> bytes:
     """
     Turn output ON.
 
+    ⚠️ DEPRECATED: Use IPComClient.turn_on() instead to preserve other outputs.
+
     For regular modules: Uses 255 (full power)
     For Module 6 (EXO DIM): Uses 100 (100% brightness)
     """
@@ -163,13 +175,19 @@ def turn_on(module: int, output: int, **kwargs) -> bytes:
 
 
 def turn_off(module: int, output: int, **kwargs) -> bytes:
-    """Turn output OFF (0)."""
+    """
+    Turn output OFF (0).
+
+    ⚠️ DEPRECATED: Use IPComClient.turn_off() instead to preserve other outputs.
+    """
     return set_output(module, output, 0, **kwargs)
 
 
 def set_dimmer(module: int, output: int, percentage: int, **kwargs) -> bytes:
     """
     Set dimmer to percentage (0-100).
+
+    ⚠️ DEPRECATED: Use IPComClient.set_dimmer() instead to preserve other outputs.
 
     IMPORTANT: Module 6 (EXO DIM) uses raw 0-100 values, NOT 0-255!
     Regular modules use 0/255 for ON/OFF, but EXO DIM uses percentage directly.

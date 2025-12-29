@@ -231,8 +231,10 @@ class IPComCoordinator(DataUpdateCoordinator):
 
             _LOGGER.debug("Command successful: %s", result.stdout.strip())
 
-            # Request immediate coordinator update to sync state
-            await self.async_request_refresh()
+            # Don't force immediate refresh - let the regular polling cycle update state
+            # This prevents commands from blocking each other (Issue #2: roller shutters)
+            # The TCP client maintains state internally, so the next poll will reflect changes
+            # await self.async_request_refresh()  # REMOVED to fix concurrent operations
 
             return True
 
