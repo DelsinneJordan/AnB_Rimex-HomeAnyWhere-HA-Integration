@@ -338,156 +338,8 @@ def control_device(client: "IPComClient", mapper: DeviceMapper, name: str, actio
         return False
 
 
-<<<<<<< HEAD
-class ShutterSafetyManager:
-    """Manages per-shutter safety timers to prevent relays staying ON indefinitely.
-
-    Safety Rules:
-    - Maximum ON time per relay: 60 seconds
-    - After 60s, BOTH relays forced OFF automatically
-    - Before any new command, BOTH relays forced OFF if any active timer exists
-    - Timers are per logical shutter (not per relay)
-    - Timer cancellation on explicit STOP
-    """
-
-    # Safety timeout: 60 seconds maximum runtime
-    SAFETY_TIMEOUT = 60.0
-
-    def __init__(self, client: "IPComClient"):
-        """Initialize safety manager.
-
-        Args:
-            client: IPComClient instance for sending STOP commands
-        """
-        self._client = client
-        self._active_timers = {}  # Dict: shutter_key -> threading.Timer
-        self._lock = threading.Lock()  # Thread-safe timer management
-
-    def _execute_safety_stop(self, shutter_key: str, up_module: int, up_output: int,
-                             down_module: int, down_output: int, display_name: str):
-        """Execute emergency safety STOP after timeout.
-
-        This is called automatically when a timer expires.
-
-        Args:
-            shutter_key: Unique identifier for the shutter
-            up_module: UP relay module number
-            up_output: UP relay output number
-            down_module: DOWN relay module number
-            down_output: DOWN relay output number
-            display_name: Human-readable shutter name
-        """
-        print(f"\n⚠️ SAFETY TIMEOUT ({self.SAFETY_TIMEOUT}s) - Forcing STOP: {display_name}")
-        print(f"   Setting UP relay OFF (Module {up_module}, Output {up_output})")
-        self._client.turn_off(up_module, up_output)
-
-        print(f"   Setting DOWN relay OFF (Module {down_module}, Output {down_output})")
-        self._client.turn_off(down_module, down_output)
-
-        print(f"✔ Safety STOP completed: {display_name} (UP=0, DOWN=0)")
-
-        # Remove timer from active list
-        with self._lock:
-            if shutter_key in self._active_timers:
-                del self._active_timers[shutter_key]
-
-    def force_stop_if_active(self, shutter_key: str, up_module: int, up_output: int,
-                             down_module: int, down_output: int, display_name: str) -> bool:
-        """Force STOP if there's an active timer for this shutter.
-
-        This is called BEFORE executing any new command to ensure safe state.
-
-        Args:
-            shutter_key: Unique identifier for the shutter
-            up_module: UP relay module number
-            up_output: UP relay output number
-            down_module: DOWN relay module number
-            down_output: DOWN relay output number
-            display_name: Human-readable shutter name
-
-        Returns:
-            True if STOP was forced, False if no active timer
-        """
-        with self._lock:
-            if shutter_key in self._active_timers:
-                # Active timer exists - cancel it and force STOP
-                print(f"⚠️ Active timer detected for {display_name} - forcing STOP first")
-
-                # Cancel existing timer
-                self._active_timers[shutter_key].cancel()
-                del self._active_timers[shutter_key]
-
-                # Force both relays OFF
-                print(f"   Setting UP relay OFF (Module {up_module}, Output {up_output})")
-                self._client.turn_off(up_module, up_output)
-
-                print(f"   Setting DOWN relay OFF (Module {down_module}, Output {down_output})")
-                self._client.turn_off(down_module, down_output)
-
-                print(f"✔ Pre-command safety STOP completed")
-                return True
-
-        return False
-
-    def start_timer(self, shutter_key: str, up_module: int, up_output: int,
-                   down_module: int, down_output: int, display_name: str):
-        """Start a new 60-second safety timer for this shutter.
-
-        Args:
-            shutter_key: Unique identifier for the shutter
-            up_module: UP relay module number
-            up_output: UP relay output number
-            down_module: DOWN relay module number
-            down_output: DOWN relay output number
-            display_name: Human-readable shutter name
-        """
-        with self._lock:
-            # Cancel any existing timer first
-            if shutter_key in self._active_timers:
-                self._active_timers[shutter_key].cancel()
-                del self._active_timers[shutter_key]
-
-            # Create new timer
-            timer = threading.Timer(
-                self.SAFETY_TIMEOUT,
-                self._execute_safety_stop,
-                args=(shutter_key, up_module, up_output, down_module, down_output, display_name)
-            )
-            timer.daemon = True  # Don't block program exit
-            timer.start()
-
-            self._active_timers[shutter_key] = timer
-
-            print(f"   Safety timer started: {self.SAFETY_TIMEOUT}s timeout")
-
-    def cancel_timer(self, shutter_key: str):
-        """Cancel safety timer for this shutter (called on explicit STOP).
-
-        Args:
-            shutter_key: Unique identifier for the shutter
-        """
-        with self._lock:
-            if shutter_key in self._active_timers:
-                self._active_timers[shutter_key].cancel()
-                del self._active_timers[shutter_key]
-                print(f"   Safety timer cancelled")
-
-    def get_active_timer_count(self) -> int:
-        """Get count of active timers (for debugging/testing).
-
-        Returns:
-            Number of active timers
-        """
-        with self._lock:
-            return len(self._active_timers)
-
-
-# Global safety manager instance (initialized when client is available)
-_safety_manager = None
-
-
 def control_cover(client: "IPComClient", mapper: DeviceMapper, name: str, action: str):
-    """Control a shutter/cover using dual-relay logic with safety timers.
+    """Control a shutter/cover using dual-relay logic.
 
     Args:
         client: IPComClient instance
@@ -502,14 +354,7 @@ def control_cover(client: "IPComClient", mapper: DeviceMapper, name: str, action
         - NEVER allow UP=1 AND DOWN=1 simultaneously
         - Always turn OFF the opposite relay before turning ON the target relay
         - STOP means both relays OFF (UP=0, DOWN=0)
-        - Maximum runtime: 60 seconds (automatic STOP)
-        - Before any new movement: force STOP if already moving
     """
-    # Initialize safety manager if needed
-    global _safety_manager
-    if _safety_manager is None:
-        _safety_manager = ShutterSafetyManager(client)
-
     # Resolve device (accept either UP or DOWN relay name)
     device = mapper.get_device(name)
 
@@ -584,16 +429,6 @@ def control_cover(client: "IPComClient", mapper: DeviceMapper, name: str, action
 
     # Execute action with safety logic
     try:
-        # CRITICAL SAFETY: Before ANY movement command, force STOP if already moving
-        # This prevents dangerous state transitions and enforces sequential operation
-        if action in ('open', 'close'):
-            _safety_manager.force_stop_if_active(
-                shutter_name,
-                up_module, up_output,
-                down_module, down_output,
-                display_name
-            )
-
         if action == 'open':
             # OPEN: Ensure DOWN=0, then set UP=1
             print(f"Opening {display_name}...")
@@ -604,14 +439,6 @@ def control_cover(client: "IPComClient", mapper: DeviceMapper, name: str, action
             client.turn_on(up_module, up_output)
 
             print(f"✔ {display_name} opening (UP=1, DOWN=0)")
-
-            # Start 60-second safety timer
-            _safety_manager.start_timer(
-                shutter_name,
-                up_module, up_output,
-                down_module, down_output,
-                display_name
-            )
 
         elif action == 'close':
             # CLOSE: Ensure UP=0, then set DOWN=1
@@ -624,14 +451,6 @@ def control_cover(client: "IPComClient", mapper: DeviceMapper, name: str, action
 
             print(f"✔ {display_name} closing (UP=0, DOWN=1)")
 
-            # Start 60-second safety timer
-            _safety_manager.start_timer(
-                shutter_name,
-                up_module, up_output,
-                down_module, down_output,
-                display_name
-            )
-
         elif action == 'stop':
             # STOP: Set both relays OFF
             print(f"Stopping {display_name}...")
@@ -642,9 +461,6 @@ def control_cover(client: "IPComClient", mapper: DeviceMapper, name: str, action
             client.turn_off(down_module, down_output)
 
             print(f"✔ {display_name} stopped (UP=0, DOWN=0)")
-
-            # Cancel safety timer
-            _safety_manager.cancel_timer(shutter_name)
 
         else:
             print(f"❌ Invalid cover action: {action} (must be 'open', 'close', or 'stop')")
@@ -657,8 +473,6 @@ def control_cover(client: "IPComClient", mapper: DeviceMapper, name: str, action
         return False
 
 
-=======
->>>>>>> parent of 199b32a (DEBUG)
 def watch_mode(client: "IPComClient", mapper: DeviceMapper):
     """Live monitoring with device names."""
     print("\n" + "=" * 60)
