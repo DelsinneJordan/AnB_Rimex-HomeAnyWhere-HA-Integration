@@ -230,7 +230,7 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_CLI_PATH: cli_path,  # Store absolute path
                         CONF_HOST: user_input[CONF_HOST],
                         CONF_PORT: user_input[CONF_PORT],
-                        CONF_SCAN_INTERVAL: user_input[CONF_SCAN_INTERVAL],
+                        # scan_interval removed - persistent connection uses 350ms polling
                     },
                 )
 
@@ -269,10 +269,6 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_PORT,
                     default=DEFAULT_PORT,
                 ): cv.port,
-                vol.Required(
-                    CONF_SCAN_INTERVAL,
-                    default=DEFAULT_SCAN_INTERVAL,
-                ): cv.positive_int,
             }
         )
 
@@ -334,6 +330,6 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_CLI_PATH: cli_path,
                 CONF_HOST: import_data[CONF_HOST],
                 CONF_PORT: import_data[CONF_PORT],
-                CONF_SCAN_INTERVAL: import_data[CONF_SCAN_INTERVAL],
+                # scan_interval removed - persistent connection uses 350ms polling
             },
         )
