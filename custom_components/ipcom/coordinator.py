@@ -124,16 +124,20 @@ class IPComCoordinator(DataUpdateCoordinator):
                 except Exception as e:
                     _LOGGER.error(f"Error processing snapshot callback: {e}", exc_info=True)
 
+            _LOGGER.critical("Registering snapshot callback...")
             self._client.on_state_snapshot(on_snapshot)
+            _LOGGER.critical("Callback registered")
 
             # Start persistent connection in executor (blocking call)
+            _LOGGER.critical("Starting persistent connection via executor...")
             success = await self.hass.async_add_executor_job(
                 self._client.start_persistent_connection,
                 True  # auto_reconnect
             )
+            _LOGGER.critical("Executor returned, success=%s", success)
 
             if success:
-                _LOGGER.info(
+                _LOGGER.critical(
                     "Persistent connection started: %s:%d (updates every 350ms)",
                     self.host,
                     self.port
@@ -141,19 +145,22 @@ class IPComCoordinator(DataUpdateCoordinator):
 
                 # Give the persistent connection a moment to receive first snapshot
                 # The status poll loop runs every 350ms, so wait up to 1 second
-                _LOGGER.debug("Waiting for first snapshot to arrive...")
+                _LOGGER.critical("Waiting for first snapshot to arrive...")
                 for i in range(10):  # Wait up to 1 second (10 * 0.1s)
                     if self._latest_data:
-                        _LOGGER.info(f"First snapshot received after {(i+1)*0.1:.1f}s with {len(self._latest_data.get('devices', {}))} devices")
+                        _LOGGER.critical(f"First snapshot received after {(i+1)*0.1:.1f}s with {len(self._latest_data.get('devices', {}))} devices")
                         break
+                    _LOGGER.critical(f"Waiting iteration {i+1}/10, latest_data={self._latest_data}")
                     await asyncio.sleep(0.1)
 
                 if not self._latest_data:
-                    _LOGGER.warning("No snapshot received after 1 second - will continue waiting in background")
+                    _LOGGER.critical("No snapshot received after 1 second - will continue waiting in background")
+                    _LOGGER.critical("Client connected: %s", self._client.is_connected() if self._client else "No client")
 
             else:
                 _LOGGER.error("Failed to start persistent connection")
 
+            _LOGGER.critical("async_start() returning success=%s", success)
             return success
 
         except Exception as e:
