@@ -1,39 +1,35 @@
-"""DataUpdateCoordinator for IPCom integration."""
+"""DataUpdateCoordinator for IPCom integration.
+
+This coordinator manages a PERSISTENT subprocess running the CLI agent.
+It does NOT poll on an interval - it receives real-time updates via stdout.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
-import sys
-from datetime import timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class IPComCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching IPCom data using persistent connection.
-
-    UPGRADED: Now uses persistent TCP connection with background loops instead of
-    subprocess calls. This matches the official HomeAnywhere app behavior.
+class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """Coordinator to manage persistent CLI agent subprocess.
 
     Architecture:
-    - Maintains a single persistent IPComClient instance
-    - Uses 3 background loops (keep-alive, status poll, command queue)
-    - Receives real-time state updates via callbacks
-    - No more connect-poll-disconnect overhead
+    - Starts ONE persistent subprocess: `python ipcom_cli.py watch --json`
+    - CLI handles TCP connection, authentication, polling, keep-alive
+    - CLI outputs newline-delimited JSON to stdout (changes only)
+    - Coordinator applies changes to maintain full device state
+    - Coordinator updates HA entities immediately via async_set_updated_data()
 
-    Benefits vs. old approach:
-    - 29× faster updates (350ms vs 10s)
-    - Real-time state changes
-    - Instant command execution
-    - Reduced CPU/network overhead
+    NO polling interval - updates are event-driven from CLI output.
     """
 
     def __init__(
@@ -42,354 +38,395 @@ class IPComCoordinator(DataUpdateCoordinator):
         cli_path: str,
         host: str,
         port: int,
-        scan_interval: int = DEFAULT_SCAN_INTERVAL,
     ) -> None:
-        """Initialize the coordinator.
+        """Initialize coordinator.
 
         Args:
             hass: Home Assistant instance
-            cli_path: Path to ipcom directory (for importing modules)
-            host: IPCom server host
-            port: IPCom server port
-            scan_interval: Fallback update interval (persistent connection updates at 350ms)
+            cli_path: Absolute path to CLI directory (containing ipcom_cli.py)
+            host: IPCom host
+            port: IPCom port
         """
-        self.cli_path = cli_path
-        self.host = host
-        self.port = port
-        self._client = None
-        self._device_mapper = None
-        self._latest_data = None
-
+        # Initialize DataUpdateCoordinator WITHOUT update_interval (no polling)
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            # Note: scan_interval is now just a fallback. Real updates happen at 350ms via callbacks
-            update_interval=timedelta(seconds=scan_interval),
+            update_interval=None,  # NO POLLING - event-driven updates only
         )
 
-    async def async_start(self) -> bool:
-        """Start the persistent connection and background loops.
+        self._cli_path = cli_path
+        self._host = host
+        self._port = port
 
-        Returns:
-            True if connection started successfully, False otherwise
+        # Subprocess management
+        self._process: asyncio.subprocess.Process | None = None
+        self._reader_task: asyncio.Task | None = None
+        self._shutdown = False
+
+        # State tracking
+        self._device_state: dict[str, dict[str, Any]] = {}  # Keyed by "category.device_key"
+        self._restart_count = 0
+        self._max_restart_attempts = 1
+
+    async def async_start(self) -> None:
+        """Start the persistent CLI subprocess and reader task.
+
+        This is called during integration setup (async_setup_entry).
         """
-        _LOGGER.critical("coordinator.async_start() CALLED")
+        _LOGGER.info("Starting IPCom CLI agent subprocess")
+        await self._start_subprocess()
+
+    async def _start_subprocess(self) -> None:
+        """Start the CLI subprocess and reader task."""
+        if self._process is not None:
+            _LOGGER.warning("Subprocess already running, stopping first")
+            await self._stop_subprocess()
+
         try:
-            # Import IPCom modules dynamically
-            _LOGGER.critical("Importing IPCom modules from: %s", self.cli_path)
-            cli_dir = os.path.dirname(self.cli_path)
-            _LOGGER.critical("CLI dir: %s", cli_dir)
-            if cli_dir not in sys.path:
-                sys.path.insert(0, cli_dir)
-                _LOGGER.critical("Added to sys.path")
+            # Build CLI command
+            cli_script = os.path.join(self._cli_path, "ipcom_cli.py")
+            cmd = [
+                "python",
+                cli_script,
+                "watch",
+                "--json",
+                "--host",
+                self._host,
+                "--port",
+                str(self._port),
+            ]
 
-            _LOGGER.critical("Importing IPComClient...")
-            from ipcom_tcp_client import IPComClient
-            _LOGGER.critical("Importing DeviceMapper...")
-            from ipcom_cli import DeviceMapper
-            _LOGGER.critical("Imports successful")
+            _LOGGER.debug("Starting CLI subprocess: %s", " ".join(cmd))
 
-            # Create client and mapper
-            _LOGGER.critical("Creating IPComClient...")
-            self._client = IPComClient(host=self.host, port=self.port, debug=False)
-            _LOGGER.critical("Creating DeviceMapper... [CODE VERSION 2025-12-29-19:30]")
+            # Start subprocess
+            self._process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._cli_path,
+            )
 
-            # DeviceMapper needs the full path to devices.yaml
-            devices_yaml_path = os.path.join(cli_dir, "devices.yaml")
-            _LOGGER.critical("🔧 FIXED VERSION: Loading devices from: %s", devices_yaml_path)
-            self._device_mapper = DeviceMapper(config_file=devices_yaml_path)
-            _LOGGER.critical("🔧 DeviceMapper created with %d devices", len(self._device_mapper.devices))
-            _LOGGER.critical("Client and mapper created")
+            # Fetch initial state via separate status command
+            await self._fetch_initial_state()
 
-            # Register callback for state updates
-            def on_snapshot(snapshot):
-                """Handle state snapshot updates from background loop."""
+            # Start reader task
+            self._reader_task = asyncio.create_task(self._read_stdout_loop())
+
+            _LOGGER.info("CLI subprocess started successfully (PID: %s)", self._process.pid)
+
+        except FileNotFoundError as err:
+            _LOGGER.error("CLI script not found: %s", cli_script)
+            raise
+        except Exception as err:
+            _LOGGER.error("Failed to start CLI subprocess: %s", err)
+            raise
+
+    async def _fetch_initial_state(self) -> None:
+        """Fetch initial device state using 'status --json' command.
+
+        This runs ONCE at startup to populate initial state before watch begins.
+        """
+        try:
+            cli_script = os.path.join(self._cli_path, "ipcom_cli.py")
+            cmd = [
+                "python",
+                cli_script,
+                "status",
+                "--json",
+                "--host",
+                self._host,
+                "--port",
+                str(self._port),
+            ]
+
+            _LOGGER.debug("Fetching initial state: %s", " ".join(cmd))
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._cli_path,
+            )
+
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30.0)
+
+            if process.returncode != 0:
+                error_msg = stderr.decode().strip() if stderr else "Unknown error"
+                _LOGGER.error("Initial state fetch failed: %s", error_msg)
+                return
+
+            # Parse JSON
+            data = json.loads(stdout.decode())
+
+            if "error" in data:
+                _LOGGER.error("CLI returned error: %s", data["error"])
+                return
+
+            # Build initial device state
+            self._device_state = {}
+            for device in data.get("devices", []):
+                device_key = device.get("device_key")
+                category = device.get("category")
+
+                if not device_key or not category:
+                    continue
+
+                entity_key = f"{category}.{device_key}"
+                self._device_state[entity_key] = device
+
+            _LOGGER.info("Initial state loaded: %d devices", len(self._device_state))
+
+            # Notify coordinator that initial data is ready
+            self.async_set_updated_data({
+                "timestamp": data.get("timestamp"),
+                "devices": self._device_state,
+            })
+
+        except asyncio.TimeoutError:
+            _LOGGER.error("Initial state fetch timed out")
+        except json.JSONDecodeError as err:
+            _LOGGER.error("Invalid JSON from initial state: %s", err)
+        except Exception as err:
+            _LOGGER.error("Unexpected error fetching initial state: %s", err)
+
+    async def _read_stdout_loop(self) -> None:
+        """Read stdout from CLI subprocess line-by-line and apply changes.
+
+        This task runs continuously until shutdown or subprocess exits.
+        """
+        _LOGGER.debug("Starting stdout reader loop")
+
+        try:
+            while not self._shutdown and self._process:
+                # Read one line (newline-delimited JSON)
+                line = await self._process.stdout.readline()
+
+                if not line:
+                    # EOF - subprocess exited
+                    _LOGGER.warning("CLI subprocess exited unexpectedly")
+                    await self._handle_subprocess_exit()
+                    break
+
+                # Parse JSON line
                 try:
-                    _LOGGER.critical(f"📡 Snapshot callback fired! [FIX v2]")
+                    data = json.loads(line.decode().strip())
+                except json.JSONDecodeError as err:
+                    _LOGGER.warning("Invalid JSON line from CLI: %s", err)
+                    continue
 
-                    # Convert snapshot to device data
-                    devices_data = self._snapshot_to_devices(snapshot)
-                    _LOGGER.critical(f"✅ Converted snapshot to {len(devices_data)} devices")
+                # Apply changes to state
+                self._apply_changes(data)
 
-                    # Store latest data
-                    self._latest_data = {
-                        "timestamp": snapshot.timestamp_iso,
-                        "devices": devices_data
-                    }
+        except asyncio.CancelledError:
+            _LOGGER.debug("Reader task cancelled")
+            raise
+        except Exception as err:
+            _LOGGER.error("Error in stdout reader loop: %s", err)
+            await self._handle_subprocess_exit()
 
-                    # Trigger coordinator update without fetching (data is already fresh)
-                    # We need to update data AND notify listeners
-                    async def update_and_notify():
-                        """Update data and notify all listening entities."""
-                        _LOGGER.critical("📡 Setting coordinator data")
-                        # Set the data on the coordinator
-                        self.data = self._latest_data
-                        self.last_update_success = True
-                        # Notify all entities that data has changed
-                        _LOGGER.critical("📡 Notifying %d listeners", len(self._listeners))
-                        self.async_update_listeners()
-                        _LOGGER.critical("📡 Listeners notified")
-
-                    # Schedule the coroutine in the event loop
-                    asyncio.run_coroutine_threadsafe(update_and_notify(), self.hass.loop)
-                    _LOGGER.critical("📡 Update scheduled")
-
-                except Exception as e:
-                    _LOGGER.error(f"Error processing snapshot callback: {e}", exc_info=True)
-
-            _LOGGER.critical("Registering snapshot callback...")
-            self._client.on_state_snapshot(on_snapshot)
-            _LOGGER.critical("Callback registered")
-
-            # Start persistent connection in executor (blocking call)
-            _LOGGER.critical("Starting persistent connection via executor...")
-            success = await self.hass.async_add_executor_job(
-                self._client.start_persistent_connection,
-                True  # auto_reconnect
-            )
-            _LOGGER.critical("Executor returned, success=%s", success)
-
-            if success:
-                _LOGGER.critical(
-                    "Persistent connection started: %s:%d (updates every 350ms)",
-                    self.host,
-                    self.port
-                )
-
-                # Give the persistent connection a moment to receive first snapshot
-                # The status poll loop runs every 350ms, so wait up to 1 second
-                _LOGGER.critical("Waiting for first snapshot to arrive...")
-                for i in range(10):  # Wait up to 1 second (10 * 0.1s)
-                    if self._latest_data:
-                        _LOGGER.critical(f"First snapshot received after {(i+1)*0.1:.1f}s with {len(self._latest_data.get('devices', {}))} devices")
-                        break
-                    _LOGGER.critical(f"Waiting iteration {i+1}/10, latest_data={self._latest_data}")
-                    await asyncio.sleep(0.1)
-
-                if not self._latest_data:
-                    _LOGGER.critical("No snapshot received after 1 second - will continue waiting in background")
-                    _LOGGER.critical("Client connected: %s", self._client.is_connected() if self._client else "No client")
-
-            else:
-                _LOGGER.error("Failed to start persistent connection")
-
-            _LOGGER.critical("async_start() returning success=%s", success)
-            return success
-
-        except Exception as e:
-            _LOGGER.error(f"Error starting persistent connection: {e}", exc_info=True)
-            return False
-
-    async def async_stop(self):
-        """Stop the persistent connection and cleanup."""
-        if self._client:
-            _LOGGER.info("Stopping persistent connection...")
-            await self.hass.async_add_executor_job(
-                self._client.stop_persistent_connection
-            )
-            self._client = None
-
-    def _snapshot_to_devices(self, snapshot) -> dict:
-        """Convert StateSnapshot to devices dict.
+    def _apply_changes(self, data: dict[str, Any]) -> None:
+        """Apply changes from watch output to device state.
 
         Args:
-            snapshot: StateSnapshot object
-
-        Returns:
-            Dict mapping "category.device_key" to device data
+            data: JSON object from CLI watch output with structure:
+                {
+                    "timestamp": "ISO-8601",
+                    "changes": [
+                        {
+                            "module": int,
+                            "output": int,
+                            "old": int,
+                            "new": int,
+                            "device_key": str (optional),
+                            "display_name": str (optional),
+                            "category": str (optional)
+                        }
+                    ]
+                }
         """
-        from models import StateSnapshot
+        changes = data.get("changes", [])
+        timestamp = data.get("timestamp")
 
-        devices = {}
+        if not changes:
+            # No changes - skip update
+            return
 
-        # Iterate through all mapped devices
-        for device_key, device_info in self._device_mapper.devices.items():
-            module = device_info["module"]
-            output = device_info["output"]
-            # Category is stored separately in device_categories dict
-            category = self._device_mapper.device_categories.get(device_key, "unknown")
-            device_type = device_info.get("type", "switch")
+        # Apply each change to device state
+        updated = False
+        for change in changes:
+            device_key = change.get("device_key")
+            category = change.get("category")
+            new_value = change.get("new")
 
-            # Get value from snapshot
-            value = snapshot.get_value(module, output)
-            if value is None:
+            if not device_key or not category:
+                # Unmapped device - skip
                 continue
 
-            # Determine state
-            state = "on" if value > 0 else "off"
-
-            # Build device data
-            device_data = {
-                "device_key": device_key,
-                "display_name": device_info.get("display_name", device_key.replace("_", " ").title()),
-                "category": category,
-                "type": device_type,
-                "module": module,
-                "output": output,
-                "value": value,
-                "state": state,
-            }
-
-            # Add brightness for dimmers
-            if device_type == "dimmer":
-                # Module 6 (EXO DIM) uses 0-100, others use 0-255
-                if module == 6:
-                    brightness = value
-                else:
-                    brightness = int((value / 255.0) * 100)
-                device_data["brightness"] = brightness
-
-            # Add cover-specific fields if present (for shutters)
-            if "relay_role" in device_info:
-                device_data["relay_role"] = device_info["relay_role"]
-            if "paired_device" in device_info:
-                device_data["paired_device"] = device_info["paired_device"]
-
-            # Add to devices dict with composite key
             entity_key = f"{category}.{device_key}"
-            devices[entity_key] = device_data
 
-        return devices
+            # Update device state
+            if entity_key in self._device_state:
+                device = self._device_state[entity_key]
+                device["value"] = new_value
+                device["state"] = "on" if new_value > 0 else "off"
 
-    async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from IPCom (fallback only - real updates via callbacks).
+                # Update brightness for dimmers
+                if device.get("type") == "dimmer":
+                    module = device.get("module")
+                    if module == 6:
+                        # EXO DIM: Value is 0-100 directly
+                        device["brightness"] = new_value
+                    else:
+                        # Regular dimmer: Convert 0-255 to 0-100
+                        device["brightness"] = int((new_value / 255) * 100) if new_value > 0 else 0
 
-        In persistent connection mode, this method is rarely called because
-        state updates happen automatically via the 350ms polling loop callback.
+                updated = True
+            else:
+                _LOGGER.debug("Change for unknown device: %s", entity_key)
 
-        This method only serves as a fallback if:
-        1. The persistent connection hasn't started yet
-        2. The connection is temporarily down
-        3. Manual refresh is requested
+        # Notify Home Assistant of updated data
+        if updated:
+            self.async_set_updated_data({
+                "timestamp": timestamp,
+                "devices": self._device_state,
+            })
 
-        Returns:
-            Dictionary with device data, or raises UpdateFailed
+    async def _handle_subprocess_exit(self) -> None:
+        """Handle unexpected subprocess exit with auto-restart logic."""
+        if self._shutdown:
+            # Expected shutdown - do nothing
+            return
+
+        _LOGGER.error("CLI subprocess exited unexpectedly")
+
+        # Auto-restart once
+        if self._restart_count < self._max_restart_attempts:
+            self._restart_count += 1
+            _LOGGER.warning("Attempting to restart CLI subprocess (attempt %d/%d)",
+                          self._restart_count, self._max_restart_attempts)
+
+            try:
+                await self._start_subprocess()
+                _LOGGER.info("CLI subprocess restarted successfully")
+            except Exception as err:
+                _LOGGER.error("Failed to restart CLI subprocess: %s", err)
+                self._mark_unavailable()
+        else:
+            _LOGGER.error("Max restart attempts reached - marking integration unavailable")
+            self._mark_unavailable()
+
+    def _mark_unavailable(self) -> None:
+        """Mark all entities as unavailable."""
+        # Set last_update_success to False to mark entities unavailable
+        self.last_update_success = False
+        self.async_update_listeners()
+
+    async def _stop_subprocess(self) -> None:
+        """Stop the CLI subprocess gracefully."""
+        _LOGGER.debug("Stopping CLI subprocess")
+
+        # Cancel reader task
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+
+        # Terminate subprocess
+        if self._process:
+            try:
+                self._process.terminate()
+                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                _LOGGER.info("CLI subprocess stopped gracefully")
+            except asyncio.TimeoutError:
+                _LOGGER.warning("CLI subprocess did not stop gracefully, killing")
+                self._process.kill()
+                await self._process.wait()
+            except Exception as err:
+                _LOGGER.error("Error stopping subprocess: %s", err)
+
+        self._process = None
+        self._reader_task = None
+
+    async def async_shutdown(self) -> None:
+        """Shutdown coordinator and stop subprocess.
+
+        Called during integration unload or HA shutdown.
         """
-        # If we have recent data from callback, return it
-        if self._latest_data:
-            _LOGGER.debug(f"Returning cached data with {len(self._latest_data.get('devices', {}))} devices")
-            return self._latest_data
-
-        # No data available yet
-        _LOGGER.debug(f"No cached data available. Client connected: {self._client.is_connected() if self._client else False}")
-        if not self._client or not self._client.is_connected():
-            raise UpdateFailed("Persistent connection not established")
-
-        # Wait for first snapshot (give it up to 2 seconds on first load)
-        _LOGGER.debug("Waiting for first snapshot from persistent connection...")
-        for i in range(20):  # Wait up to 2 seconds (20 * 0.1s)
-            if self._latest_data:
-                _LOGGER.debug(f"Received first snapshot after {(i+1)*0.1:.1f}s")
-                return self._latest_data
-            await asyncio.sleep(0.1)
-
-        # Still no data - this is an error
-        raise UpdateFailed("No snapshot data received after 2 seconds. Check connection to device.")
+        _LOGGER.info("Shutting down IPCom coordinator")
+        self._shutdown = True
+        await self._stop_subprocess()
 
     async def async_execute_command(
         self, device_key: str, command: str, value: int | None = None
     ) -> bool:
-        """Execute a control command via persistent connection.
+        """Execute a control command via separate CLI subprocess.
 
-        Commands are queued and executed by the command queue loop,
-        which automatically pauses status polling during execution.
+        This spawns a SHORT-LIVED CLI process to execute the command.
+        The persistent watch process continues running in the background.
 
         Args:
             device_key: Device identifier (e.g., "keuken")
-            command: Command to execute ("on", "off", "toggle", "dim")
+            command: Command to execute ("on", "off", "dim")
             value: Optional value for dim command (0-100)
 
         Returns:
             True if command succeeded, False otherwise
         """
-        if not self._client or not self._client.is_connected():
-            _LOGGER.error("Cannot execute command: not connected")
-            return False
-
-        if not self._device_mapper:
-            _LOGGER.error("Cannot execute command: device mapper not initialized")
-            return False
-
         try:
-            # Get device info from mapper
-            device_info = self._device_mapper.get_device(device_key)
-            if not device_info:
-                _LOGGER.error(f"Device not found: {device_key}")
+            # Build command
+            cli_script = os.path.join(self._cli_path, "ipcom_cli.py")
+            cmd = [
+                "python",
+                cli_script,
+                command,
+                device_key,
+            ]
+
+            # Add value for dim command
+            if command == "dim" and value is not None:
+                cmd.append(str(value))
+
+            # Add connection parameters
+            cmd.extend([
+                "--host",
+                self._host,
+                "--port",
+                str(self._port),
+            ])
+
+            _LOGGER.debug("Executing command: %s", " ".join(cmd))
+
+            # Execute subprocess
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._cli_path,
+            )
+
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=10.0
+            )
+
+            if process.returncode != 0:
+                error_msg = stderr.decode().strip() if stderr else "Unknown error"
+                _LOGGER.error(
+                    "Command failed (exit %d): %s", process.returncode, error_msg
+                )
                 return False
 
-            module = device_info["module"]
-            output = device_info["output"]
+            _LOGGER.debug("Command successful: %s", stdout.decode().strip())
 
-            # Execute command based on type
-            if command == "on":
-                _LOGGER.critical(f"📤 Queuing ON command for {device_key} (M{module}O{output})")
-                await self.hass.async_add_executor_job(
-                    self._client.queue_command,
-                    self._client.turn_on,
-                    module,
-                    output
-                )
-                _LOGGER.critical(f"✅ ON command queued for {device_key}")
+            # State update will arrive via watch process - no need to refresh
 
-            elif command == "off":
-                _LOGGER.critical(f"📤 Queuing OFF command for {device_key} (M{module}O{output})")
-                await self.hass.async_add_executor_job(
-                    self._client.queue_command,
-                    self._client.turn_off,
-                    module,
-                    output
-                )
-                _LOGGER.critical(f"✅ OFF command queued for {device_key}")
-
-            elif command == "dim":
-                if value is None:
-                    _LOGGER.error("Dim command requires value")
-                    return False
-
-                _LOGGER.critical(f"📤 Queuing DIM command for {device_key} (M{module}O{output}) to {value}%")
-                await self.hass.async_add_executor_job(
-                    self._client.queue_command,
-                    self._client.set_dimmer,
-                    module,
-                    output,
-                    value
-                )
-                _LOGGER.critical(f"✅ DIM command queued for {device_key}")
-
-            elif command == "toggle":
-                # Get current state
-                current_value = self._client.get_value(module, output)
-                if current_value is None:
-                    _LOGGER.error(f"Cannot toggle: no current state for {device_key}")
-                    return False
-
-                # Toggle
-                if current_value > 0:
-                    _LOGGER.debug(f"Toggling {device_key} OFF (current: {current_value})")
-                    await self.hass.async_add_executor_job(
-                        self._client.queue_command,
-                        self._client.turn_off,
-                        module,
-                        output
-                    )
-                else:
-                    _LOGGER.debug(f"Toggling {device_key} ON (current: {current_value})")
-                    await self.hass.async_add_executor_job(
-                        self._client.queue_command,
-                        self._client.turn_on,
-                        module,
-                        output
-                    )
-
-            else:
-                _LOGGER.error(f"Unknown command: {command}")
-                return False
-
-            # Command queued successfully
-            # State will update automatically via 350ms polling loop callback
             return True
 
+        except asyncio.TimeoutError:
+            _LOGGER.error("Command timed out after 10s")
+            return False
         except Exception as err:
-            _LOGGER.error(f"Error executing command: {err}", exc_info=True)
+            _LOGGER.error("Error executing command: %s", err)
             return False
