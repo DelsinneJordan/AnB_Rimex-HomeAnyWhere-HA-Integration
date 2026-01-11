@@ -29,6 +29,7 @@ import time
 import argparse
 import json
 import logging
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, List
@@ -643,10 +644,17 @@ def print_status_json(client: "IPComClient", mapper: DeviceMapper, host: str):
     print(json.dumps(output, ensure_ascii=False, indent=2))
 
 
-def watch_mode_json(client: "IPComClient", mapper: DeviceMapper):
-    """Live monitoring in JSON format (newline-delimited JSON)."""
+def watch_mode_json(client: "IPComClient", mapper: DeviceMapper, host: str, port: int):
+    """Live monitoring in JSON format (newline-delimited JSON).
+
+    Features robust connection handling with automatic reconnection
+    to ensure continuous operation for Home Assistant integration.
+    """
     snapshot_count = 0
     last_snapshot = None
+    last_data_time = time.time()
+    CONNECTION_TIMEOUT = 90  # Consider connection dead after 90s of no data
+    RECONNECT_DELAY = 5  # Base delay between reconnection attempts
 
     # Create reverse lookup: (module, output) -> device_key
     address_to_device = {}
@@ -657,8 +665,9 @@ def watch_mode_json(client: "IPComClient", mapper: DeviceMapper):
             address_to_device[(module, output)] = device_key
 
     def on_snapshot(snapshot):
-        nonlocal snapshot_count, last_snapshot
+        nonlocal snapshot_count, last_snapshot, last_data_time
         snapshot_count += 1
+        last_data_time = time.time()
 
         # Detect changes
         changes = []
@@ -699,13 +708,77 @@ def watch_mode_json(client: "IPComClient", mapper: DeviceMapper):
     # Register callback
     client.on_state_snapshot(on_snapshot)
 
-    try:
-        # Keep running and process incoming data
-        while True:
-            client._receive_loop()  # Process incoming network data
+    reconnect_attempts = 0
+
+    while True:
+        try:
+            # Check for connection timeout (no data received)
+            if time.time() - last_data_time > CONNECTION_TIMEOUT:
+                logging.warning("Connection timeout - no data received for %ds", CONNECTION_TIMEOUT)
+                raise ConnectionError("Connection timeout")
+
+            # Process incoming network data
+            client._receive_loop()
             time.sleep(0.05)  # Small delay to prevent CPU spin
-    except KeyboardInterrupt:
-        pass  # Silent exit for JSON mode
+
+            # Reset reconnect counter on successful data reception
+            if time.time() - last_data_time < 5:
+                reconnect_attempts = 0
+
+        except KeyboardInterrupt:
+            break  # Silent exit for JSON mode
+
+        except (socket.error, ConnectionError, OSError) as e:
+            reconnect_attempts += 1
+            delay = min(RECONNECT_DELAY * reconnect_attempts, 60)
+
+            logging.warning("Connection lost: %s. Reconnecting in %ds (attempt %d)...",
+                          str(e), delay, reconnect_attempts)
+
+            # Clean up old connection
+            try:
+                client.disconnect()
+            except:
+                pass
+
+            time.sleep(delay)
+
+            # Attempt reconnection
+            try:
+                # Re-import to get fresh client
+                from ipcom_tcp_client import IPComClient
+
+                client = IPComClient(host, port)
+
+                if not client.connect():
+                    logging.error("Reconnection failed: could not connect")
+                    continue
+
+                if not client.authenticate():
+                    logging.error("Reconnection failed: authentication failed")
+                    client.disconnect()
+                    continue
+
+                client.start_snapshot_polling()
+                client.on_state_snapshot(on_snapshot)
+
+                # Wait for first snapshot
+                start = time.time()
+                while not client.get_latest_snapshot() and time.time() - start < 5:
+                    client._receive_loop()
+                    time.sleep(0.05)
+
+                last_data_time = time.time()
+                logging.info("Reconnected successfully after %d attempts", reconnect_attempts)
+
+            except Exception as reconnect_err:
+                logging.error("Reconnection attempt failed: %s", reconnect_err)
+                continue
+
+        except Exception as e:
+            logging.error("Unexpected error in watch loop: %s", e)
+            # Continue running, don't crash
+            time.sleep(1)
 
 
 def main():
@@ -824,7 +897,7 @@ Device names are defined in devices.yaml
 
         elif args.command == 'watch':
             if args.json:
-                watch_mode_json(client, mapper)
+                watch_mode_json(client, mapper, args.host, args.port)
             else:
                 watch_mode(client, mapper)
 
