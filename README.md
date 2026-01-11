@@ -25,41 +25,28 @@ Control your Home Anywhere Blue home automation system from Home Assistant.
 5. Select category: **"Integration"**
 6. Click **"Add"**
 7. Search for **"IPCom Home Anywhere Blue"** and install it
-8. **Important**: You still need to copy the CLI folder manually (see Step 2 below)
+8. Restart Home Assistant
+9. Configure your devices (see Step 2 below)
 
 ### Option 2: Manual Installation
 
-Copy both folders to your Home Assistant config directory:
+Copy the `custom_components/ipcom` folder to your Home Assistant config directory:
 
 ```
 /config/
-├── ipcom/                         # CLI tool (required)
-│   ├── ipcom_cli.py
-│   ├── ipcom_tcp_client.py
-│   ├── devices.yaml
-│   └── ...
-│
 └── custom_components/ipcom/       # Home Assistant integration
+    ├── cli/                       # Bundled CLI (auto-installed)
     └── ...
 ```
 
 **Using SSH/SCP:**
 ```bash
-scp -r ipcom user@homeassistant:/config/
 scp -r custom_components/ipcom user@homeassistant:/config/custom_components/
 ```
 
-### Step 2: Copy CLI Files (Required for both options)
+### Step 2: Configure Your Devices
 
-The CLI tool must be copied manually to `/config/ipcom/`:
-
-```bash
-scp -r ipcom user@homeassistant:/config/
-```
-
-### Step 3: Configure Your Devices
-
-Edit `/config/ipcom/devices.yaml` with your devices:
+Create `/config/ipcom/devices.yaml` with your devices:
 
 ```yaml
 lights:
@@ -90,13 +77,12 @@ shutters:
     paired_device: shutter_kitchen_down
 ```
 
-### Step 4: Add the Integration
+### Step 3: Add the Integration
 
 1. Restart Home Assistant
 2. Go to **Settings** > **Devices & Services** > **Add Integration**
 3. Search for **"IPCom Home Anywhere Blue"**
 4. Enter your connection details:
-   - **CLI Path**: `ipcom` (or `/config/ipcom`)
    - **Host**: Your IPCom server hostname or IP
    - **Port**: `5000` (default)
    - **Username**: Your IPCom username
@@ -125,16 +111,7 @@ logger:
 |-------|----------|
 | "Authentication failed" | Check username and password |
 | "Connection failed" | Check host and port, ensure IPCom server is reachable |
-| "CLI not found" | Check CLI path points to the `ipcom` folder |
 | Devices not appearing | Check `devices.yaml` configuration |
-
-### Test CLI Manually
-
-```bash
-# SSH into Home Assistant and test the CLI
-cd /config/ipcom
-python3 ipcom_cli.py status --host YOUR_HOST --port 5000 --username YOUR_USER --password YOUR_PASS
-```
 
 ---
 

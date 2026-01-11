@@ -38,8 +38,8 @@ COVER_DEPLOYMENT.md
 CODEBASE_SANITATION_REPORT.md
 
 # User-specific device configuration (example file is tracked)
-ipcom/devices.yaml
-!ipcom/devices.example.yaml
+# devices.yaml in the bundled CLI or user's config dir should not be committed
+custom_components/ipcom/cli/devices.yaml
 
 # Build artifacts
 build/
