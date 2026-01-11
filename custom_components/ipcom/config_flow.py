@@ -132,11 +132,12 @@ async def validate_cli_connection(
 
     def _run_cli():
         """Run CLI command synchronously (blocking)."""
+        # Use check=False to capture output even on failure
         return subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            check=True,
+            check=False,  # Don't raise exception, we'll check returncode manually
             timeout=30,
             cwd=cli_path,  # Set working directory to CLI location
         )
@@ -145,9 +146,32 @@ async def validate_cli_connection(
         # Run CLI in executor to avoid blocking event loop
         result = await hass.async_add_executor_job(_run_cli)
 
-        # Log stdout/stderr for debugging
-        _LOGGER.debug("CLI stdout length: %d bytes", len(result.stdout))
-        _LOGGER.debug("CLI stderr length: %d bytes", len(result.stderr))
+        # Log stdout/stderr for debugging (always log for troubleshooting)
+        _LOGGER.debug("CLI exit code: %d", result.returncode)
+        _LOGGER.debug("CLI stdout length: %d bytes", len(result.stdout) if result.stdout else 0)
+        _LOGGER.debug("CLI stderr length: %d bytes", len(result.stderr) if result.stderr else 0)
+
+        # Check for failure BEFORE parsing JSON
+        if result.returncode != 0:
+            # CLI failed - get error message from stdout (CLI prints errors there)
+            error_output = result.stdout or result.stderr or "(no output)"
+            _LOGGER.error(
+                "CLI command failed | exit_code: %d | output: %s",
+                result.returncode,
+                error_output[:500]
+            )
+            # Extract meaningful error message for user
+            if "Authentication failed" in error_output or "❌ Authentication failed" in error_output:
+                raise ValueError("Authentication failed - check username and password")
+            elif "Connection failed" in error_output or "❌ Connection failed" in error_output:
+                raise ValueError("Connection failed - check host and port")
+            elif "timed out" in error_output.lower():
+                raise ValueError("Connection timed out - check host and port")
+            else:
+                # Use first line of output as error message
+                first_line = error_output.strip().split('\n')[0][:200]
+                raise ValueError(f"CLI failed: {first_line}")
+
         if result.stderr:
             _LOGGER.warning("CLI stderr output: %s", result.stderr[:500])
         if not result.stdout:
@@ -179,17 +203,6 @@ async def validate_cli_connection(
             "timestamp": timestamp,
         }
 
-    except subprocess.CalledProcessError as err:
-        # Log both stdout and stderr for debugging - stderr might be empty
-        _LOGGER.error(
-            "CLI command failed | exit_code: %d | stderr: %s | stdout: %s",
-            err.returncode,
-            err.stderr[:500] if err.stderr else "(empty)",
-            err.stdout[:500] if err.stdout else "(empty)"
-        )
-        # Include both streams in error message for better diagnostics
-        error_details = err.stderr or err.stdout or f"exit code {err.returncode}"
-        raise ValueError(f"CLI command failed: {error_details}") from err
     except FileNotFoundError as err:
         _LOGGER.error(
             "Python executable or CLI script not found: %s | python_exe: %s | cli_script: %s",
@@ -271,7 +284,7 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.error("Validation error: %s", err)
                 error_str = str(err).lower()
                 # Set generic error key, will be translated
-                if "not found" in error_str:
+                if "not found" in error_str and "cli" in error_str:
                     errors["base"] = "cli_not_found"
                 elif "not readable" in error_str:
                     errors["base"] = "cli_not_readable"
@@ -279,8 +292,10 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "connection_timeout"
                 elif "invalid json" in error_str:
                     errors["base"] = "invalid_json"
-                elif "auth" in error_str or "credential" in error_str or "password" in error_str:
+                elif "auth" in error_str or "credential" in error_str or "password" in error_str or "username" in error_str:
                     errors["base"] = "auth_failed"
+                elif "connection" in error_str and "failed" in error_str:
+                    errors["base"] = "connection_timeout"
                 elif "failed" in error_str:
                     errors["base"] = "cli_failed"
                 else:
