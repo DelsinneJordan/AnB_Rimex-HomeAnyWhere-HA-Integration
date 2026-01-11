@@ -15,7 +15,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN
+from .const import DOMAIN, get_python_executable
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,8 +125,9 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             # Build CLI command
             cli_script = os.path.join(self._cli_path, "ipcom_cli.py")
+            python_exe = get_python_executable()
             cmd = [
-                "python",
+                python_exe,
                 cli_script,
                 "watch",
                 "--json",
@@ -140,7 +141,8 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._password,
             ]
 
-            _LOGGER.debug("Starting CLI subprocess: %s", " ".join(cmd))
+            _LOGGER.debug("Starting CLI subprocess with Python: %s", python_exe)
+            _LOGGER.debug("CLI command: %s ... (credentials hidden)", " ".join(cmd[:5]))
 
             # Start subprocess
             self._process = await asyncio.create_subprocess_exec(
@@ -185,8 +187,9 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         try:
             cli_script = os.path.join(self._cli_path, "ipcom_cli.py")
+            python_exe = get_python_executable()
             cmd = [
-                "python",
+                python_exe,
                 cli_script,
                 "status",
                 "--json",
@@ -200,7 +203,7 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._password,
             ]
 
-            _LOGGER.debug("Fetching initial state: %s", " ".join(cmd[:8]) + " ...")
+            _LOGGER.debug("Fetching initial state: %s ... (credentials hidden)", " ".join(cmd[:5]))
 
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -613,8 +616,9 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 # Build command
                 cli_script = os.path.join(self._cli_path, "ipcom_cli.py")
+                python_exe = get_python_executable()
                 cmd = [
-                    "python",
+                    python_exe,
                     cli_script,
                     command,
                     device_key,

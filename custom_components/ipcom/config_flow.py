@@ -34,6 +34,7 @@ from .const import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DOMAIN,
+    get_python_executable,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -106,8 +107,10 @@ async def validate_cli_connection(
         ValueError: If CLI fails, returns invalid JSON, or contract is wrong
     """
     cli_script = os.path.join(cli_path, "ipcom_cli.py")
+    python_exe = get_python_executable()
+
     cmd = [
-        "python",
+        python_exe,
         cli_script,
         "status",
         "--json",
@@ -121,8 +124,11 @@ async def validate_cli_connection(
         password,
     ]
 
-    _LOGGER.debug("Validating CLI connection: %s", " ".join(cmd))
+    _LOGGER.debug("Validating CLI connection using Python: %s", python_exe)
+    _LOGGER.debug("CLI command: %s ... (credentials hidden)", " ".join(cmd[:6]))
     _LOGGER.debug("CLI working directory: %s", cli_path)
+    _LOGGER.debug("CLI script path: %s", cli_script)
+    _LOGGER.debug("CLI script exists: %s", os.path.exists(cli_script))
 
     def _run_cli():
         """Run CLI command synchronously (blocking)."""
@@ -174,8 +180,22 @@ async def validate_cli_connection(
         }
 
     except subprocess.CalledProcessError as err:
-        _LOGGER.error("CLI command failed: %s", err.stderr)
-        raise ValueError(f"CLI command failed: {err.stderr}") from err
+        # Log both stdout and stderr for debugging - stderr might be empty
+        _LOGGER.error(
+            "CLI command failed | exit_code: %d | stderr: %s | stdout: %s",
+            err.returncode,
+            err.stderr[:500] if err.stderr else "(empty)",
+            err.stdout[:500] if err.stdout else "(empty)"
+        )
+        # Include both streams in error message for better diagnostics
+        error_details = err.stderr or err.stdout or f"exit code {err.returncode}"
+        raise ValueError(f"CLI command failed: {error_details}") from err
+    except FileNotFoundError as err:
+        _LOGGER.error(
+            "Python executable or CLI script not found: %s | python_exe: %s | cli_script: %s",
+            err, python_exe, cli_script
+        )
+        raise ValueError(f"Python or CLI script not found: {err}") from err
     except subprocess.TimeoutExpired as err:
         _LOGGER.error("CLI command timed out after 30 seconds")
         raise ValueError("CLI command timed out - check host/port") from err
@@ -183,7 +203,7 @@ async def validate_cli_connection(
         _LOGGER.error("CLI returned invalid JSON: %s", err)
         raise ValueError(f"CLI returned invalid JSON: {err}") from err
     except Exception as err:
-        _LOGGER.error("Unexpected error validating CLI: %s", err)
+        _LOGGER.error("Unexpected error validating CLI: %s", err, exc_info=True)
         raise ValueError(f"Unexpected error: {err}") from err
 
 
@@ -249,16 +269,19 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             except ValueError as err:
                 _LOGGER.error("Validation error: %s", err)
+                error_str = str(err).lower()
                 # Set generic error key, will be translated
-                if "not found" in str(err).lower():
+                if "not found" in error_str:
                     errors["base"] = "cli_not_found"
-                elif "not readable" in str(err).lower():
+                elif "not readable" in error_str:
                     errors["base"] = "cli_not_readable"
-                elif "timed out" in str(err).lower():
+                elif "timed out" in error_str:
                     errors["base"] = "connection_timeout"
-                elif "invalid json" in str(err).lower():
+                elif "invalid json" in error_str:
                     errors["base"] = "invalid_json"
-                elif "failed" in str(err).lower():
+                elif "auth" in error_str or "credential" in error_str or "password" in error_str:
+                    errors["base"] = "auth_failed"
+                elif "failed" in error_str:
                     errors["base"] = "cli_failed"
                 else:
                     errors["base"] = "unknown"
