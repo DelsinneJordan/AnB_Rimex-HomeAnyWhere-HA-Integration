@@ -650,11 +650,28 @@ def watch_mode_json(client: "IPComClient", mapper: DeviceMapper, host: str, port
     Features robust connection handling with automatic reconnection
     to ensure continuous operation for Home Assistant integration.
     """
+    # Get logger for this module
+    logger = logging.getLogger("ipcom_cli.watch")
+
     snapshot_count = 0
     last_snapshot = None
     last_data_time = time.time()
+    session_start_time = time.time()
     CONNECTION_TIMEOUT = 90  # Consider connection dead after 90s of no data
     RECONNECT_DELAY = 5  # Base delay between reconnection attempts
+
+    # Statistics for diagnostics
+    stats = {
+        "total_snapshots": 0,
+        "total_changes": 0,
+        "reconnect_count": 0,
+        "session_start": time.time(),
+    }
+
+    logger.info(
+        "Watch mode started - connected to %s:%s | timeout: %ds",
+        host, port, CONNECTION_TIMEOUT
+    )
 
     # Create reverse lookup: (module, output) -> device_key
     address_to_device = {}
@@ -667,6 +684,7 @@ def watch_mode_json(client: "IPComClient", mapper: DeviceMapper, host: str, port
     def on_snapshot(snapshot):
         nonlocal snapshot_count, last_snapshot, last_data_time
         snapshot_count += 1
+        stats["total_snapshots"] += 1
         last_data_time = time.time()
 
         # Detect changes
@@ -694,6 +712,7 @@ def watch_mode_json(client: "IPComClient", mapper: DeviceMapper, host: str, port
                             change['category'] = mapper.get_category(device_key)
 
                         changes.append(change)
+                        stats["total_changes"] += 1
 
         # Output JSON line
         output = {
@@ -709,41 +728,63 @@ def watch_mode_json(client: "IPComClient", mapper: DeviceMapper, host: str, port
     client.on_state_snapshot(on_snapshot)
 
     reconnect_attempts = 0
+    loop_iterations = 0
 
     while True:
+        loop_iterations += 1
         try:
             # Check for connection timeout (no data received)
-            if time.time() - last_data_time > CONNECTION_TIMEOUT:
-                logging.warning("Connection timeout - no data received for %ds", CONNECTION_TIMEOUT)
-                raise ConnectionError("Connection timeout")
+            time_since_data = time.time() - last_data_time
+            if time_since_data > CONNECTION_TIMEOUT:
+                session_uptime = time.time() - stats["session_start"]
+                logger.warning(
+                    "Connection timeout detected | no data for %.0fs (limit: %ds) | "
+                    "session uptime: %.1f min | snapshots this session: %d | "
+                    "total changes: %d",
+                    time_since_data, CONNECTION_TIMEOUT,
+                    session_uptime / 60,
+                    stats["total_snapshots"],
+                    stats["total_changes"]
+                )
+                raise ConnectionError(f"Connection timeout - no data for {time_since_data:.0f}s")
 
             # Process incoming network data
             client._receive_loop()
             time.sleep(0.05)  # Small delay to prevent CPU spin
 
             # Reset reconnect counter on successful data reception
-            if time.time() - last_data_time < 5:
+            if time_since_data < 5:
                 reconnect_attempts = 0
 
         except KeyboardInterrupt:
+            logger.info("Watch mode interrupted by user")
             break  # Silent exit for JSON mode
 
         except (socket.error, ConnectionError, OSError) as e:
             reconnect_attempts += 1
+            stats["reconnect_count"] += 1
             delay = min(RECONNECT_DELAY * reconnect_attempts, 60)
 
-            logging.warning("Connection lost: %s. Reconnecting in %ds (attempt %d)...",
-                          str(e), delay, reconnect_attempts)
+            session_uptime = time.time() - stats["session_start"]
+            logger.warning(
+                "Connection lost: %s | "
+                "reconnect attempt #%d (total: %d) | delay: %ds | "
+                "session was up for %.1f min | snapshots received: %d",
+                str(e), reconnect_attempts, stats["reconnect_count"],
+                delay, session_uptime / 60, stats["total_snapshots"]
+            )
 
             # Clean up old connection
             try:
                 client.disconnect()
-            except:
-                pass
+                logger.debug("Old connection disconnected cleanly")
+            except Exception as disconnect_err:
+                logger.debug("Error disconnecting old connection: %s", disconnect_err)
 
             time.sleep(delay)
 
             # Attempt reconnection
+            logger.info("Attempting reconnection to %s:%s...", host, port)
             try:
                 # Re-import to get fresh client
                 from ipcom_tcp_client import IPComClient
@@ -751,32 +792,57 @@ def watch_mode_json(client: "IPComClient", mapper: DeviceMapper, host: str, port
                 client = IPComClient(host, port)
 
                 if not client.connect():
-                    logging.error("Reconnection failed: could not connect")
+                    logger.error(
+                        "Reconnection failed: could not establish TCP connection to %s:%s",
+                        host, port
+                    )
                     continue
 
+                logger.debug("TCP connection established, authenticating...")
+
                 if not client.authenticate():
-                    logging.error("Reconnection failed: authentication failed")
+                    logger.error(
+                        "Reconnection failed: authentication rejected by %s:%s",
+                        host, port
+                    )
                     client.disconnect()
                     continue
 
+                logger.debug("Authentication successful, starting polling...")
                 client.start_snapshot_polling()
                 client.on_state_snapshot(on_snapshot)
 
                 # Wait for first snapshot
+                logger.debug("Waiting for first snapshot after reconnect...")
                 start = time.time()
                 while not client.get_latest_snapshot() and time.time() - start < 5:
                     client._receive_loop()
                     time.sleep(0.05)
 
                 last_data_time = time.time()
-                logging.info("Reconnected successfully after %d attempts", reconnect_attempts)
+                stats["session_start"] = time.time()  # Reset session timer
+
+                logger.info(
+                    "Reconnected successfully to %s:%s after %d attempts | "
+                    "total reconnects: %d",
+                    host, port, reconnect_attempts, stats["reconnect_count"]
+                )
 
             except Exception as reconnect_err:
-                logging.error("Reconnection attempt failed: %s", reconnect_err)
+                logger.error(
+                    "Reconnection attempt #%d failed: %s | will retry in %ds",
+                    reconnect_attempts, reconnect_err,
+                    min(RECONNECT_DELAY * (reconnect_attempts + 1), 60)
+                )
                 continue
 
         except Exception as e:
-            logging.error("Unexpected error in watch loop: %s", e)
+            logger.error(
+                "Unexpected error in watch loop (iteration %d): %s | "
+                "continuing operation",
+                loop_iterations, e,
+                exc_info=True
+            )
             # Continue running, don't crash
             time.sleep(1)
 

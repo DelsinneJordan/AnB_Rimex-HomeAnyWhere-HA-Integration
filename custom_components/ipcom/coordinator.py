@@ -79,6 +79,17 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._health_check_interval = 60.0  # Check every 60 seconds
         self._connection_timeout = 120.0  # Consider dead after 2 minutes of no data
 
+        # Connection statistics for diagnostics
+        self._stats = {
+            "start_time": None,
+            "total_restarts": 0,
+            "total_data_lines": 0,
+            "last_restart_reason": None,
+            "last_restart_time": None,
+            "longest_uptime": 0.0,
+            "current_session_start": None,
+        }
+
         # Command throttling to prevent overwhelming the IPCom server
         self._command_lock = asyncio.Lock()
         self._command_delay = 0.5  # 500ms delay between commands
@@ -89,7 +100,11 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         This is called during integration setup (async_setup_entry).
         """
-        _LOGGER.info("Starting IPCom CLI agent subprocess")
+        self._stats["start_time"] = time.time()
+        _LOGGER.info(
+            "Starting IPCom coordinator - connecting to %s:%s",
+            self._host, self._port
+        )
         await self._start_subprocess()
 
         # Start health check task
@@ -136,6 +151,7 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Reset failure counter on successful start
             self._consecutive_failures = 0
             self._last_data_received = time.time()
+            self._stats["current_session_start"] = time.time()
 
         except FileNotFoundError as err:
             _LOGGER.error("CLI script not found: %s", cli_script)
@@ -226,18 +242,23 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 if not line:
                     # EOF - subprocess exited
-                    _LOGGER.warning("CLI subprocess exited unexpectedly")
-                    await self._handle_subprocess_exit()
+                    _LOGGER.warning("CLI subprocess stdout closed (EOF received)")
+                    await self._handle_subprocess_exit("subprocess stdout EOF")
                     break
 
                 # Track data reception for health monitoring
                 self._last_data_received = time.time()
+                self._stats["total_data_lines"] += 1
 
                 # Parse JSON line
+                line_str = line.decode().strip()
                 try:
-                    data = json.loads(line.decode().strip())
+                    data = json.loads(line_str)
                 except json.JSONDecodeError as err:
-                    _LOGGER.warning("Invalid JSON line from CLI: %s", err)
+                    _LOGGER.warning(
+                        "Invalid JSON line from CLI (line #%d): %s - content: %s",
+                        self._stats["total_data_lines"], err, line_str[:200]
+                    )
                     continue
 
                 # Apply changes to state
@@ -247,8 +268,8 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Reader task cancelled")
             raise
         except Exception as err:
-            _LOGGER.error("Error in stdout reader loop: %s", err)
-            await self._handle_subprocess_exit()
+            _LOGGER.error("Error in stdout reader loop: %s", err, exc_info=True)
+            await self._handle_subprocess_exit(f"reader loop exception: {err}")
 
     def _apply_changes(self, data: dict[str, Any]) -> None:
         """Apply changes from watch output to device state.
@@ -317,18 +338,44 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "devices": self._device_state,
             })
 
-    async def _handle_subprocess_exit(self) -> None:
+    async def _handle_subprocess_exit(self, reason: str = "unknown") -> None:
         """Handle unexpected subprocess exit with auto-restart logic.
 
         Uses exponential backoff with unlimited retries to ensure the
         integration eventually recovers from temporary network issues.
+
+        Args:
+            reason: Description of why the subprocess exited (for logging)
         """
         if self._shutdown:
             # Expected shutdown - do nothing
             return
 
+        # Calculate session uptime before incrementing failure counter
+        session_uptime = 0.0
+        if self._stats["current_session_start"]:
+            session_uptime = time.time() - self._stats["current_session_start"]
+            if session_uptime > self._stats["longest_uptime"]:
+                self._stats["longest_uptime"] = session_uptime
+
         self._consecutive_failures += 1
-        _LOGGER.error("CLI subprocess exited unexpectedly (failure #%d)", self._consecutive_failures)
+        self._stats["total_restarts"] += 1
+        self._stats["last_restart_reason"] = reason
+        self._stats["last_restart_time"] = time.time()
+
+        # Log detailed diagnostics
+        _LOGGER.error(
+            "CLI subprocess exited - reason: %s | "
+            "failure #%d | session uptime: %.1f min | "
+            "total restarts: %d | longest uptime: %.1f min | "
+            "total data lines received: %d",
+            reason,
+            self._consecutive_failures,
+            session_uptime / 60,
+            self._stats["total_restarts"],
+            self._stats["longest_uptime"] / 60,
+            self._stats["total_data_lines"]
+        )
 
         # Calculate backoff delay with exponential increase
         delay = min(
@@ -351,17 +398,27 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._shutdown:
             return
 
+        _LOGGER.info("Attempting CLI subprocess restart now...")
+
         # Attempt restart
         try:
             await self._start_subprocess()
-            _LOGGER.info("CLI subprocess restarted successfully after %d attempts", self._consecutive_failures)
+            _LOGGER.info(
+                "CLI subprocess restarted successfully after %d attempts - "
+                "connection restored to %s:%s",
+                self._consecutive_failures, self._host, self._port
+            )
             # Mark as available again
             self.last_update_success = True
             self.async_update_listeners()
         except Exception as err:
-            _LOGGER.error("Failed to restart CLI subprocess: %s", err)
+            _LOGGER.error(
+                "Failed to restart CLI subprocess: %s | "
+                "will retry with increased delay",
+                err
+            )
             # Schedule another retry by calling this handler again
-            asyncio.create_task(self._handle_subprocess_exit())
+            asyncio.create_task(self._handle_subprocess_exit(f"restart failed: {err}"))
 
     def _mark_unavailable(self) -> None:
         """Mark all entities as unavailable."""
@@ -385,9 +442,19 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     break
 
                 # Check if subprocess is still running
-                if self._process is None or self._process.returncode is not None:
-                    _LOGGER.warning("Health check: subprocess not running, triggering restart")
-                    await self._handle_subprocess_exit()
+                if self._process is None:
+                    _LOGGER.warning(
+                        "Health check: subprocess object is None, triggering restart"
+                    )
+                    await self._handle_subprocess_exit("subprocess object is None")
+                    continue
+
+                if self._process.returncode is not None:
+                    _LOGGER.warning(
+                        "Health check: subprocess exited with code %d, triggering restart",
+                        self._process.returncode
+                    )
+                    await self._handle_subprocess_exit(f"subprocess exited with code {self._process.returncode}")
                     continue
 
                 # Check for data reception timeout
@@ -395,17 +462,23 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     time_since_data = time.time() - self._last_data_received
                     if time_since_data > self._connection_timeout:
                         _LOGGER.warning(
-                            "Health check: no data received for %.0f seconds, restarting subprocess",
-                            time_since_data
+                            "Health check: connection stale - no data received for %.0f seconds "
+                            "(timeout: %.0f seconds) | last data at: %s | restarting subprocess",
+                            time_since_data,
+                            self._connection_timeout,
+                            time.strftime("%H:%M:%S", time.localtime(self._last_data_received))
                         )
                         # Force stop the subprocess and trigger restart
                         await self._stop_subprocess()
-                        await self._handle_subprocess_exit()
+                        await self._handle_subprocess_exit(f"connection timeout ({time_since_data:.0f}s no data)")
                         continue
 
+                # Only log health check OK at debug level to avoid log spam
                 _LOGGER.debug(
-                    "Health check: connection OK (last data %.0f seconds ago)",
-                    time.time() - self._last_data_received if self._last_data_received > 0 else 0
+                    "Health check: OK | PID: %s | last data: %.0fs ago | session uptime: %.1f min",
+                    self._process.pid if self._process else "N/A",
+                    time.time() - self._last_data_received if self._last_data_received > 0 else 0,
+                    (time.time() - self._stats["current_session_start"]) / 60 if self._stats["current_session_start"] else 0
                 )
 
         except asyncio.CancelledError:
