@@ -3,15 +3,14 @@
 # This is the FINAL, GROUND TRUTH mapping of module/output addresses to device names.
 # This mapping is used by:
 #   - CLI commands (ipcom_cli.py)
-#   - Future Home Assistant integration (unchanged)
-#
+#   
 # ⚠️ IMPORTANT:
 #   - Device names are EXACT and must be preserved (spacing, capitalization)
 #   - CLI accepts case-insensitive input but displays canonical names
 #   - One-to-one mapping (no duplicates allowed)
 #   - Validated at startup for conflicts
 #
-# Format:
+
 #   category:
 #     device_name:
 #       module: 1-16        # EXO module number
@@ -112,20 +111,24 @@ lights:
 
 
 # =====================================================
-# SHUTTERS (ROLLUIKEN) - Module 5
+# SHUTTERS 
 # =====================================================
 # Dual-Relay Control System:
 #   Each physical shutter requires TWO relays (UP and DOWN)
 #   Safety: UP=1 & DOWN=1 must NEVER occur
 #   STOP is achieved by setting both relays to 0
 #
-# Relay Naming Convention:
-#   *_d = DOWN relay (closes shutter)
-#   *_m = UP/Motor relay (opens shutter)
 #
-# Example for "Living room left":
-#   UP relay:   rolluik_sal_links_m (output 2)
-#   DOWN relay: rolluik_sal_links_d (output 1)
+# Format:
+#   Device_name:
+#     module: 5
+#     output: 1
+#     type: switch
+#     display_name: "Shutter Name"
+#     description: "Living room left shutter - Down relay"
+#     relay_role: down
+#     paired_device: ()
+
 # =====================================================
 shutters:
   rolluik_sal_links_d:
