@@ -32,6 +32,7 @@ stderr.txt
 outputmapping.txt
 nul
 ha_reverse/
+devices.yaml
 DEPLOYMENT_SUMMARY.md
 
 # Build artifacts

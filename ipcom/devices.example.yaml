@@ -1,0 +1,146 @@
+# =====================================================
+# Home Anywhere Blue – Device Configuration TEMPLATE
+# =====================================================
+#
+# ⚠️ THIS FILE IS A TEMPLATE (devices.example.yaml)
+#
+# This file is provided as an EXAMPLE for integrators.
+#
+# -----------------------------------------------------
+# 👉 HOW TO USE THIS FILE
+#
+# 1️⃣ Copy or rename this file:
+#     devices.example.yaml  →  devices.yaml
+#
+# 2️⃣ Configure ALL devices according to the installation
+#
+# 3️⃣ Ensure `devices.yaml` is present at runtime
+#
+# -----------------------------------------------------
+# ⚠️ IMPORTANT
+#
+# - The application will ONLY load: devices.yaml
+# - devices.yaml.example is NEVER loaded
+# - If devices.yaml is missing, the application WILL fail
+#
+# =====================================================
+#
+# This file is the SINGLE source of truth for:
+#  - physical modules and relay outputs
+#  - logical device identifiers
+#  - mapping to CLI and Home Assistant entities
+#
+# =====================================================
+
+
+# =====================================================
+# GENERAL STRUCTURE
+# =====================================================
+#
+# lights:
+#   device_key: <light name used by ipcom>
+#     module: <module number used by ipcom>
+#     output: <output number used by ipcom>
+#     type: <switch | dimmer>
+#     display_name: "<user visible name>"
+#     description: "<optional free text>"
+#
+# =====================================================
+
+lights:
+  kitchen_light:
+    module: 1
+    output: 1
+    type: light
+    display_name: "KITCHEN LIGHT"
+    description: "Main ceiling lighting – kitchen"
+
+  bathroom_light:
+    module: 1
+    output: 2
+    type: dimmer
+    display_name: "BATHROOM LIGHT"
+    description: "Main bathroom lighting"
+
+
+
+# =====================================================
+# SHUTTERS / ROLLER SHUTTERS (READ CAREFULLY)
+# =====================================================
+#
+# ⚠️ EACH SHUTTER IS DEFINED USING **TWO SEPARATE DEVICES** ⚠️
+#
+# Physical reality:
+# - One relay drives the motor UP
+# - One relay drives the motor DOWN
+#
+# Configuration reality:
+# - BOTH relays must be defined separately in this file
+# - The two entries MUST reference each other using `paired_device`
+#
+# -----------------------------------------------------
+# MANDATORY RULES
+#
+# 1️⃣ Every shutter MUST have exactly two entries:
+#    - one with relay_role: up
+#    - one with relay_role: down
+#
+# 2️⃣ paired_device MUST point to the other relay entry
+#
+# 3️⃣ display_name MAY be identical for both entries
+#    → They will be combined into a single cover in Home Assistant
+#
+# 4️⃣ relay_role is critical:
+#    - up   = shutter opening direction
+#    - down = shutter closing direction
+#
+# -----------------------------------------------------
+# shutters:
+#   device_key: <"shutter_*" name used by ipcom>
+#     module: <module number used by ipcom>
+#     output: <output number used by ipcom>
+#     type: <switch>
+#     display_name: "<user visible name>"
+#     description: "<optional free text>"
+#     relay_role: <down | up>
+#     paired_device: <opposite "shutter_*" name used by ipcom>
+#
+# =====================================================
+
+shutters:
+  shutter_kitchen_d:
+    module: 5
+    output: 7
+    type: switch
+    display_name: "KITCHEN SHUTTER"
+    description: "Kitchen shutter – DOWN relay"
+    relay_role: down
+    paired_device: shutter_kitchen_u
+
+  shutter_kitchen_u:
+    module: 5
+    output: 8
+    type: switch
+    display_name: "KITCHEN SHUTTER"
+    description: "Kitchen shutter – UP relay"
+    relay_role: up
+    paired_device: shutter_kitchen_d
+
+
+# =====================================================
+# COMMON CONFIGURATION ERRORS (READ THIS!)
+# =====================================================
+#
+# ❌ Using this file without renaming it → NOT LOADED
+# ❌ Defining only one relay → shutter will NOT work
+# ❌ Missing relay_role → direction cannot be determined
+# ❌ Incorrect paired_device reference → validation failure
+# ❌ Using the same output for UP and DOWN → hardware damage risk
+#
+# ✅ ALWAYS VERIFY:
+# - file renamed to devices.yaml
+# - two device entries per shutter
+# - correct pairing in both directions
+# - correct relay roles
+#
+# =====================================================
