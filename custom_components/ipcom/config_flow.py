@@ -29,9 +29,12 @@ import homeassistant.helpers.config_validation as cv
 
 from .const import (
     CONF_CLI_PATH,
+    CONF_USERNAME,
+    CONF_PASSWORD,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DOMAIN,
+    get_python_executable,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,7 +82,8 @@ def validate_cli_path(cli_path: str) -> str:
 
 
 async def validate_cli_connection(
-    hass: HomeAssistant, cli_path: str, host: str, port: int
+    hass: HomeAssistant, cli_path: str, host: str, port: int,
+    username: str, password: str
 ) -> dict[str, Any]:
     """Validate that CLI can connect to IPCom and return valid JSON.
 
@@ -91,6 +95,8 @@ async def validate_cli_connection(
         cli_path: Absolute path to CLI directory
         host: IPCom host
         port: IPCom port
+        username: IPCom username
+        password: IPCom password
 
     Returns:
         dict with:
@@ -101,8 +107,10 @@ async def validate_cli_connection(
         ValueError: If CLI fails, returns invalid JSON, or contract is wrong
     """
     cli_script = os.path.join(cli_path, "ipcom_cli.py")
+    python_exe = get_python_executable()
+
     cmd = [
-        "python",
+        python_exe,
         cli_script,
         "status",
         "--json",
@@ -110,18 +118,26 @@ async def validate_cli_connection(
         host,
         "--port",
         str(port),
+        "--username",
+        username,
+        "--password",
+        password,
     ]
 
-    _LOGGER.debug("Validating CLI connection: %s", " ".join(cmd))
+    _LOGGER.debug("Validating CLI connection using Python: %s", python_exe)
+    _LOGGER.debug("CLI command: %s ... (credentials hidden)", " ".join(cmd[:6]))
     _LOGGER.debug("CLI working directory: %s", cli_path)
+    _LOGGER.debug("CLI script path: %s", cli_script)
+    _LOGGER.debug("CLI script exists: %s", os.path.exists(cli_script))
 
     def _run_cli():
         """Run CLI command synchronously (blocking)."""
+        # Use check=False to capture output even on failure
         return subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            check=True,
+            check=False,  # Don't raise exception, we'll check returncode manually
             timeout=30,
             cwd=cli_path,  # Set working directory to CLI location
         )
@@ -130,9 +146,32 @@ async def validate_cli_connection(
         # Run CLI in executor to avoid blocking event loop
         result = await hass.async_add_executor_job(_run_cli)
 
-        # Log stdout/stderr for debugging
-        _LOGGER.debug("CLI stdout length: %d bytes", len(result.stdout))
-        _LOGGER.debug("CLI stderr length: %d bytes", len(result.stderr))
+        # Log stdout/stderr for debugging (always log for troubleshooting)
+        _LOGGER.debug("CLI exit code: %d", result.returncode)
+        _LOGGER.debug("CLI stdout length: %d bytes", len(result.stdout) if result.stdout else 0)
+        _LOGGER.debug("CLI stderr length: %d bytes", len(result.stderr) if result.stderr else 0)
+
+        # Check for failure BEFORE parsing JSON
+        if result.returncode != 0:
+            # CLI failed - get error message from stdout (CLI prints errors there)
+            error_output = result.stdout or result.stderr or "(no output)"
+            _LOGGER.error(
+                "CLI command failed | exit_code: %d | output: %s",
+                result.returncode,
+                error_output[:500]
+            )
+            # Extract meaningful error message for user
+            if "Authentication failed" in error_output or "❌ Authentication failed" in error_output:
+                raise ValueError("Authentication failed - check username and password")
+            elif "Connection failed" in error_output or "❌ Connection failed" in error_output:
+                raise ValueError("Connection failed - check host and port")
+            elif "timed out" in error_output.lower():
+                raise ValueError("Connection timed out - check host and port")
+            else:
+                # Use first line of output as error message
+                first_line = error_output.strip().split('\n')[0][:200]
+                raise ValueError(f"CLI failed: {first_line}")
+
         if result.stderr:
             _LOGGER.warning("CLI stderr output: %s", result.stderr[:500])
         if not result.stdout:
@@ -164,9 +203,12 @@ async def validate_cli_connection(
             "timestamp": timestamp,
         }
 
-    except subprocess.CalledProcessError as err:
-        _LOGGER.error("CLI command failed: %s", err.stderr)
-        raise ValueError(f"CLI command failed: {err.stderr}") from err
+    except FileNotFoundError as err:
+        _LOGGER.error(
+            "Python executable or CLI script not found: %s | python_exe: %s | cli_script: %s",
+            err, python_exe, cli_script
+        )
+        raise ValueError(f"Python or CLI script not found: {err}") from err
     except subprocess.TimeoutExpired as err:
         _LOGGER.error("CLI command timed out after 30 seconds")
         raise ValueError("CLI command timed out - check host/port") from err
@@ -174,7 +216,7 @@ async def validate_cli_connection(
         _LOGGER.error("CLI returned invalid JSON: %s", err)
         raise ValueError(f"CLI returned invalid JSON: {err}") from err
     except Exception as err:
-        _LOGGER.error("Unexpected error validating CLI: %s", err)
+        _LOGGER.error("Unexpected error validating CLI: %s", err, exc_info=True)
         raise ValueError(f"Unexpected error: {err}") from err
 
 
@@ -211,6 +253,8 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     cli_path,
                     user_input[CONF_HOST],
                     user_input[CONF_PORT],
+                    user_input[CONF_USERNAME],
+                    user_input[CONF_PASSWORD],
                 )
 
                 # Check for existing entries with same host
@@ -231,21 +275,28 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_CLI_PATH: cli_path,  # Store absolute path
                         CONF_HOST: user_input[CONF_HOST],
                         CONF_PORT: user_input[CONF_PORT],
+                        CONF_USERNAME: user_input[CONF_USERNAME],
+                        CONF_PASSWORD: user_input[CONF_PASSWORD],
                     },
                 )
 
             except ValueError as err:
                 _LOGGER.error("Validation error: %s", err)
+                error_str = str(err).lower()
                 # Set generic error key, will be translated
-                if "not found" in str(err).lower():
+                if "not found" in error_str and "cli" in error_str:
                     errors["base"] = "cli_not_found"
-                elif "not readable" in str(err).lower():
+                elif "not readable" in error_str:
                     errors["base"] = "cli_not_readable"
-                elif "timed out" in str(err).lower():
+                elif "timed out" in error_str:
                     errors["base"] = "connection_timeout"
-                elif "invalid json" in str(err).lower():
+                elif "invalid json" in error_str:
                     errors["base"] = "invalid_json"
-                elif "failed" in str(err).lower():
+                elif "auth" in error_str or "credential" in error_str or "password" in error_str or "username" in error_str:
+                    errors["base"] = "auth_failed"
+                elif "connection" in error_str and "failed" in error_str:
+                    errors["base"] = "connection_timeout"
+                elif "failed" in error_str:
                     errors["base"] = "cli_failed"
                 else:
                     errors["base"] = "unknown"
@@ -263,12 +314,18 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ): cv.string,
                 vol.Required(
                     CONF_HOST,
-                    default=DEFAULT_HOST,
+                    description={"suggested_value": "your-ipcom-host.example.com"},
                 ): cv.string,
                 vol.Required(
                     CONF_PORT,
                     default=DEFAULT_PORT,
                 ): cv.port,
+                vol.Required(
+                    CONF_USERNAME,
+                ): cv.string,
+                vol.Required(
+                    CONF_PASSWORD,
+                ): cv.string,
             }
         )
 
@@ -310,6 +367,8 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 cli_path,
                 import_data[CONF_HOST],
                 import_data[CONF_PORT],
+                import_data.get(CONF_USERNAME, ""),
+                import_data.get(CONF_PASSWORD, ""),
             )
             _LOGGER.info(
                 "YAML import validation successful: %d devices found",
@@ -330,5 +389,7 @@ class IPComConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_CLI_PATH: cli_path,
                 CONF_HOST: import_data[CONF_HOST],
                 CONF_PORT: import_data[CONF_PORT],
+                CONF_USERNAME: import_data.get(CONF_USERNAME, ""),
+                CONF_PASSWORD: import_data.get(CONF_PASSWORD, ""),
             },
         )
