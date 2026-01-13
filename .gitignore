@@ -51,5 +51,10 @@ dist/
 *.temp
 *~
 
+# Github Workflows
+.github
+
+
+
 # Home Assistant custom component - don't ignore
 !custom_components/
