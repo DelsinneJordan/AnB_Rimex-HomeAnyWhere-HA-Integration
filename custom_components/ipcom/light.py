@@ -95,6 +95,8 @@ class IPComLight(CoordinatorEntity[IPComCoordinator], LightEntity):
     @property
     def is_on(self) -> bool:
         """Return True if light is on."""
+        if not self.coordinator.data or "devices" not in self.coordinator.data:
+            return False
         device_data = self.coordinator.data["devices"].get(self._entity_key)
         if not device_data:
             return False
@@ -126,6 +128,8 @@ class IPComDimmerLight(IPComLight):
     @property
     def brightness(self) -> int | None:
         """Return the brightness of the light (0-255)."""
+        if not self.coordinator.data or "devices" not in self.coordinator.data:
+            return None
         device_data = self.coordinator.data["devices"].get(self._entity_key)
         if not device_data:
             return None
