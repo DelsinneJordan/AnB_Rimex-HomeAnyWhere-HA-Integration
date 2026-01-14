@@ -29,14 +29,32 @@ async def async_setup_entry(
     coordinator: IPComCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []
-    for entity_key, device_data in coordinator.data["devices"].items():
-        category = device_data.get("category")
-        if category == "lights":
-            device_type = device_data.get("type", "switch")
+
+    # Check if we have devices config from auto-discovery
+    if coordinator.devices_config and "lights" in coordinator.devices_config:
+        # Use devices from config entry (auto-discovery)
+        for device_key, device_info in coordinator.devices_config["lights"].items():
+            entity_key = f"lights.{device_key}"
+            device_data = {
+                "device_key": device_key,
+                "category": "lights",
+                **device_info,
+            }
+            device_type = device_info.get("type", "light")
             if device_type == "dimmer":
                 entities.append(IPComDimmerLight(coordinator, entity_key, device_data))
             else:
                 entities.append(IPComLight(coordinator, entity_key, device_data))
+    elif coordinator.data and "devices" in coordinator.data:
+        # Fallback: Use devices from CLI (devices.yaml)
+        for entity_key, device_data in coordinator.data["devices"].items():
+            category = device_data.get("category")
+            if category == "lights":
+                device_type = device_data.get("type", "switch")
+                if device_type == "dimmer":
+                    entities.append(IPComDimmerLight(coordinator, entity_key, device_data))
+                else:
+                    entities.append(IPComLight(coordinator, entity_key, device_data))
 
     async_add_entities(entities)
 

@@ -25,29 +25,63 @@ Control your Home Anywhere Blue home automation system from Home Assistant.
 5. Search for **"IPCom Home Anywhere Blue"** and click **Download**
 6. **Restart Home Assistant**
 
-### Step 2: Configure Your Devices
+### Step 2: Add the Integration
 
-Create the device configuration file at `/config/ipcom/devices.yaml`:
+1. Go to **Settings** → **Devices & Services** → **Add Integration**
+2. Search for **"IPCom Home Anywhere Blue"**
+3. Choose your setup method:
 
-**Option A: Using File Editor Add-on (recommended)**
-1. Install the **File Editor** add-on from the Add-on Store if you haven't already
-2. Open File Editor and navigate to the `/config/` folder
-3. Create a new folder called `ipcom`
-4. Open `/config/custom_components/ipcom/cli/devices.example.yaml` and copy its contents
-5. Create a new file `/config/ipcom/devices.yaml` and paste the contents
-6. Edit with your device configuration
+**Option A: Auto-discover from HomeAnywhere (Recommended)**
 
-**Option B: Using SSH**
+This is the easiest method - no manual configuration needed!
+
+1. Select **"Auto-discover from HomeAnywhere"**
+2. Enter your HomeAnywhere cloud credentials
+3. Select your site from the list
+4. Review the discovered devices and confirm
+
+The integration will automatically:
+- Discover all your lights, dimmers, and shutters
+- Configure the IPCom connection details
+- Store everything safely (survives HACS updates!)
+
+**Option B: Manual Configuration**
+
+If you prefer manual setup or don't have HomeAnywhere cloud access:
+
+1. Select **"Manual configuration"**
+2. Enter your IPCom connection details
+3. Create a `devices.yaml` file (see below)
+
+### Re-discovering Devices
+
+To add new devices or refresh your configuration:
+
+1. Go to **Settings** → **Devices & Services**
+2. Find your IPCom integration and click **Configure**
+3. Select **"Re-discover devices from HomeAnywhere"**
+4. Enter your credentials and select the site
+
+Your existing entity IDs will be preserved!
+
+---
+
+### Manual Device Configuration (Optional)
+
+If using manual setup, create `/config/ipcom/devices.yaml`:
+
+**Using CLI Tool:**
 ```bash
-mkdir -p /config/ipcom
-cp /config/custom_components/ipcom/cli/devices.example.yaml /config/ipcom/devices.yaml
+cd /config/custom_components/ipcom/discovery
+python discover_devices.py
 ```
 
-Edit `/config/ipcom/devices.yaml` with your actual device configuration.
+**Using File Editor:**
+1. Create folder `/config/ipcom/`
+2. Copy `/config/custom_components/ipcom/cli/devices.example.yaml`
+3. Edit with your device configuration
 
-> **Note:** The `devices.yaml` file is stored in `/config/ipcom/` (outside the integration folder) so it won't be overwritten when you update the integration via HACS.
->
-> Find the mapping info in the official desktop Home Anywhere application (IPCOM/Installer credentials needed).
+> **Note:** When using auto-discovery, device configuration is stored in Home Assistant's database and survives HACS updates automatically.
 
 Example configuration:
 

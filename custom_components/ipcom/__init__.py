@@ -11,6 +11,12 @@ from .const import (
     CONF_PORT,
     CONF_USERNAME,
     CONF_PASSWORD,
+    CONF_DEVICES,
+    CONF_CONNECTION_TYPE,
+    CONF_LOCAL_HOST,
+    CONF_LOCAL_PORT,
+    CONF_REMOTE_HOST,
+    CONF_REMOTE_PORT,
     DOMAIN,
     PLATFORMS,
 )
@@ -26,6 +32,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     port = entry.data[CONF_PORT]
     username = entry.data.get(CONF_USERNAME, "")
     password = entry.data.get(CONF_PASSWORD, "")
+    devices_config = entry.data.get(CONF_DEVICES)  # May be None for manual config
+
+    # Extract connection type configuration
+    connection_type = entry.data.get(CONF_CONNECTION_TYPE)
+    local_host = entry.data.get(CONF_LOCAL_HOST)
+    local_port = entry.data.get(CONF_LOCAL_PORT)
+    remote_host = entry.data.get(CONF_REMOTE_HOST)
+    remote_port = entry.data.get(CONF_REMOTE_PORT)
+
+    _LOGGER.info(
+        "Setting up IPCom integration | host: %s:%s | connection_type: %s | "
+        "local: %s:%s | remote: %s:%s",
+        host, port, connection_type or "not set",
+        local_host or "N/A", local_port or "N/A",
+        remote_host or "N/A", remote_port or "N/A"
+    )
 
     # Create coordinator (CLI path is auto-detected from bundled CLI)
     coordinator = IPComCoordinator(
@@ -34,6 +56,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         port=port,
         username=username,
         password=password,
+        devices_config=devices_config,
+        connection_type=connection_type,
+        local_host=local_host,
+        local_port=local_port,
+        remote_host=remote_host,
+        remote_port=remote_port,
     )
 
     # Start persistent CLI subprocess

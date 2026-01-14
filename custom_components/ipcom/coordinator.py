@@ -15,7 +15,14 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN, get_cli_path, get_devices_yaml_path, get_python_executable
+from .const import (
+    DOMAIN,
+    CONNECTION_TYPE_LOCAL,
+    CONNECTION_TYPE_BOTH,
+    get_cli_path,
+    get_devices_yaml_path,
+    get_python_executable,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,15 +47,27 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         port: int,
         username: str,
         password: str,
+        devices_config: dict | None = None,
+        connection_type: str | None = None,
+        local_host: str | None = None,
+        local_port: int | None = None,
+        remote_host: str | None = None,
+        remote_port: int | None = None,
     ) -> None:
         """Initialize coordinator.
 
         Args:
             hass: Home Assistant instance
-            host: IPCom host
-            port: IPCom port
+            host: IPCom host (primary connection)
+            port: IPCom port (primary connection)
             username: IPCom authentication username
             password: IPCom authentication password
+            devices_config: Optional device config from config entry (auto-discovery)
+            connection_type: Connection preference (local/remote/both)
+            local_host: Local IPCom address (for fallback)
+            local_port: Local IPCom port (for fallback)
+            remote_host: Remote IPCom address (for fallback)
+            remote_port: Remote IPCom port (for fallback)
         """
         # Initialize DataUpdateCoordinator WITHOUT update_interval (no polling)
         super().__init__(
@@ -65,6 +84,18 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._port = port
         self._username = username
         self._password = password
+
+        # Store devices config from config entry (if using auto-discovery)
+        self._devices_config = devices_config
+
+        # Connection fallback configuration
+        self._connection_type = connection_type or CONNECTION_TYPE_LOCAL
+        self._local_host = local_host
+        self._local_port = local_port
+        self._remote_host = remote_host
+        self._remote_port = remote_port
+        self._using_fallback = False  # Track if we're on fallback connection
+        self._fallback_attempted = False  # Track if fallback was already tried
 
         # Subprocess management
         self._process: asyncio.subprocess.Process | None = None
@@ -100,6 +131,15 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._command_lock = asyncio.Lock()
         self._command_delay = 0.5  # 500ms delay between commands
         self._last_command_time: float = 0.0
+
+    @property
+    def devices_config(self) -> dict | None:
+        """Get the devices configuration from config entry.
+
+        Returns:
+            Device config dict if using auto-discovery, None if using devices.yaml
+        """
+        return self._devices_config
 
     async def async_start(self) -> None:
         """Start the persistent CLI subprocess and reader task.
@@ -374,11 +414,71 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "devices": self._device_state,
             })
 
+    def _try_fallback_connection(self) -> bool:
+        """Try to switch to fallback connection if available.
+
+        For CONNECTION_TYPE_BOTH:
+        - If on local, switch to remote
+        - If on remote, switch back to local
+
+        Returns:
+            True if switched to fallback, False if no fallback available
+        """
+        if self._connection_type != CONNECTION_TYPE_BOTH:
+            _LOGGER.debug(
+                "FALLBACK_SKIP | connection_type: %s | fallback only available for 'both'",
+                self._connection_type
+            )
+            return False
+
+        if not self._local_host or not self._remote_host:
+            _LOGGER.warning(
+                "FALLBACK_UNAVAILABLE | local_host: %s | remote_host: %s | "
+                "both addresses required for fallback",
+                self._local_host or "not set",
+                self._remote_host or "not set"
+            )
+            return False
+
+        # Determine current and fallback addresses
+        current_is_local = (
+            self._host == self._local_host and
+            self._port == self._local_port
+        )
+
+        if current_is_local:
+            # Switch to remote
+            _LOGGER.info(
+                "FALLBACK_SWITCH | from: local (%s:%s) | to: remote (%s:%s) | "
+                "reason: local connection failed",
+                self._local_host, self._local_port,
+                self._remote_host, self._remote_port
+            )
+            self._host = self._remote_host
+            self._port = self._remote_port
+            self._using_fallback = True
+        else:
+            # Switch back to local (try local again)
+            _LOGGER.info(
+                "FALLBACK_SWITCH | from: remote (%s:%s) | to: local (%s:%s) | "
+                "reason: remote connection failed, retrying local",
+                self._remote_host, self._remote_port,
+                self._local_host, self._local_port
+            )
+            self._host = self._local_host
+            self._port = self._local_port
+            self._using_fallback = False
+
+        return True
+
     async def _handle_subprocess_exit(self, reason: str = "unknown") -> None:
         """Handle unexpected subprocess exit with auto-restart logic.
 
         Uses exponential backoff with unlimited retries to ensure the
         integration eventually recovers from temporary network issues.
+
+        For CONNECTION_TYPE_BOTH, will attempt fallback to alternate connection
+        before applying exponential backoff.
 
         Args:
             reason: Description of why the subprocess exited (for logging)
@@ -404,15 +504,56 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "CLI_EXIT | reason: %s | "
             "failure #%d | session: %.1f min | "
             "total restarts: %d | best uptime: %.1f min | "
-            "data lines: %d | host: %s:%s",
+            "data lines: %d | host: %s:%s | connection_type: %s | using_fallback: %s",
             reason,
             self._consecutive_failures,
             session_uptime / 60,
             self._stats["total_restarts"],
             self._stats["longest_uptime"] / 60,
             self._stats["total_data_lines"],
-            self._host, self._port
+            self._host, self._port,
+            self._connection_type,
+            self._using_fallback
         )
+
+        # Try fallback connection for CONNECTION_TYPE_BOTH
+        # Only try fallback on first failure, then use backoff
+        switched_to_fallback = False
+        if self._consecutive_failures == 1 and self._connection_type == CONNECTION_TYPE_BOTH:
+            switched_to_fallback = self._try_fallback_connection()
+            if switched_to_fallback:
+                # Immediate retry on fallback without delay
+                _LOGGER.info(
+                    "FALLBACK_RETRY | immediate retry on fallback connection | "
+                    "new host: %s:%s",
+                    self._host, self._port
+                )
+                # Mark as temporarily unavailable during reconnection
+                self.last_update_success = False
+                self.async_update_listeners()
+
+                if self._shutdown:
+                    return
+
+                try:
+                    await self._start_subprocess()
+                    _LOGGER.info(
+                        "FALLBACK_SUCCESS | connected via fallback | host: %s:%s | "
+                        "using_fallback: %s",
+                        self._host, self._port,
+                        self._using_fallback
+                    )
+                    self._consecutive_failures = 0  # Reset on successful fallback
+                    self.last_update_success = True
+                    self.async_update_listeners()
+                    return
+                except Exception as err:
+                    _LOGGER.warning(
+                        "FALLBACK_FAILED | error: %s | host: %s:%s | "
+                        "falling back to exponential backoff",
+                        err, self._host, self._port
+                    )
+                    # Continue to exponential backoff below
 
         # Calculate backoff delay with exponential increase
         delay = min(
@@ -438,16 +579,24 @@ class IPComCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._shutdown:
             return
 
-        _LOGGER.info("Attempting CLI subprocess restart now...")
+        # For CONNECTION_TYPE_BOTH, alternate between connections on each retry
+        if self._connection_type == CONNECTION_TYPE_BOTH and self._consecutive_failures > 1:
+            self._try_fallback_connection()
+
+        _LOGGER.info(
+            "CLI_RESTART_ATTEMPT | attempt: %d | host: %s:%s",
+            self._consecutive_failures, self._host, self._port
+        )
 
         # Attempt restart
         try:
             await self._start_subprocess()
             _LOGGER.info(
                 "CLI_RESTART_OK | attempts: %d | host: %s:%s | "
-                "total restarts: %d | integration restored",
+                "total restarts: %d | integration restored | using_fallback: %s",
                 self._consecutive_failures, self._host, self._port,
-                self._stats["total_restarts"]
+                self._stats["total_restarts"],
+                self._using_fallback
             )
             # Mark as available again
             self.last_update_success = True

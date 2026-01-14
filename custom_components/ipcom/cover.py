@@ -31,16 +31,37 @@ async def async_setup_entry(
     entities = []
     covers_added = set()
 
-    for entity_key, device_data in coordinator.data["devices"].items():
-        category = device_data.get("category")
-        if category == "shutters":
-            relay_role = device_data.get("relay_role")
-            device_key = device_data.get("device_key")
+    # Check if we have devices config from auto-discovery
+    if coordinator.devices_config and "shutters" in coordinator.devices_config:
+        # Use devices from config entry (auto-discovery)
+        for device_key, device_info in coordinator.devices_config["shutters"].items():
+            relay_role = device_info.get("relay_role")
 
             # Only create cover for "up" relay (to avoid duplicates)
-            if relay_role == "up" and device_key not in covers_added:
-                entities.append(IPComCover(coordinator, entity_key, device_data))
-                covers_added.add(device_key)
+            if relay_role == "up":
+                # Extract base name for the cover (remove _u suffix)
+                cover_name = device_key.replace("_u", "")
+                if cover_name not in covers_added:
+                    entity_key = f"shutters.{device_key}"
+                    device_data = {
+                        "device_key": device_key,
+                        "category": "shutters",
+                        **device_info,
+                    }
+                    entities.append(IPComCover(coordinator, entity_key, device_data))
+                    covers_added.add(cover_name)
+    elif coordinator.data and "devices" in coordinator.data:
+        # Fallback: Use devices from CLI (devices.yaml)
+        for entity_key, device_data in coordinator.data["devices"].items():
+            category = device_data.get("category")
+            if category == "shutters":
+                relay_role = device_data.get("relay_role")
+                device_key = device_data.get("device_key")
+
+                # Only create cover for "up" relay (to avoid duplicates)
+                if relay_role == "up" and device_key not in covers_added:
+                    entities.append(IPComCover(coordinator, entity_key, device_data))
+                    covers_added.add(device_key)
 
     async_add_entities(entities)
 

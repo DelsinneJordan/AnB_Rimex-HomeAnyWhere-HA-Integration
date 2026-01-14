@@ -3,7 +3,43 @@
     "step": {
       "user": {
         "title": "IPCom Home Anywhere Blue",
-        "description": "Set up your IPCom Home Anywhere Blue integration",
+        "description": "Choose how you want to set up your IPCom integration.",
+        "data": {
+          "setup_method": "Setup method"
+        }
+      },
+      "cloud_login": {
+        "title": "HomeAnywhere Login",
+        "description": "Enter your HomeAnywhere cloud credentials to automatically discover your devices.",
+        "data": {
+          "cloud_username": "HomeAnywhere Username",
+          "cloud_password": "HomeAnywhere Password"
+        }
+      },
+      "select_site": {
+        "title": "Select Site",
+        "description": "Choose the site you want to configure.",
+        "data": {
+          "site": "Site"
+        }
+      },
+      "confirm_devices": {
+        "title": "Confirm Devices",
+        "description": "The following devices were discovered:\n\n**Site:** {site_name}\n**IPCom:** {ipcom_name}\n**Address:** {ipcom_address}\n\n**Devices:**\n- Lights: {lights}\n- Dimmers: {dimmers}\n- Shutters: {shutters}\n\nClick Submit to continue to connection settings."
+      },
+      "connection_type": {
+        "title": "Connection Type",
+        "description": "Choose how to connect to your IPCom device.\n\n**Local:** {local_address}\n**Remote:** {remote_address}",
+        "data": {
+          "connection_type": "Preferred Connection"
+        },
+        "data_description": {
+          "connection_type": "Select 'Both' to use local when available with automatic remote fallback"
+        }
+      },
+      "manual": {
+        "title": "Manual Configuration",
+        "description": "Enter your IPCom connection details manually.\n\n**Note:** You will need to create a devices.yaml file separately.",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -19,14 +55,72 @@
       }
     },
     "error": {
+      "cloud_auth_failed": "HomeAnywhere login failed - check username and password",
+      "cloud_connection_failed": "Could not connect to HomeAnywhere cloud",
+      "no_sites": "No sites found on your HomeAnywhere account",
+      "no_ipcoms": "No IPCom devices found on this site",
+      "fetch_config_failed": "Failed to fetch site configuration",
       "connection_timeout": "Connection to IPCom timed out - check host and port",
       "invalid_json": "CLI returned invalid JSON - check CLI installation",
       "cli_failed": "CLI command failed - check credentials and connection",
       "auth_failed": "Authentication failed - check username and password",
-      "unknown": "Unknown error occurred"
+      "connection_failed": "Connection failed - check host and port",
+      "local_connection_failed": "Could not connect to local IPCom address",
+      "remote_connection_failed": "Could not connect to remote IPCom address",
+      "both_connections_failed": "Could not connect to either local or remote address",
+      "unknown": "An unexpected error occurred"
     },
     "abort": {
       "already_configured": "This IPCom device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "IPCom Options",
+        "description": "What would you like to do?",
+        "data": {
+          "action": "Action"
+        }
+      },
+      "rediscover": {
+        "title": "Re-discover Devices",
+        "description": "Enter your HomeAnywhere credentials to update your device list.",
+        "data": {
+          "cloud_username": "HomeAnywhere Username",
+          "cloud_password": "HomeAnywhere Password"
+        }
+      },
+      "select_site": {
+        "title": "Select Site",
+        "description": "Choose the site to update devices from.",
+        "data": {
+          "site": "Site"
+        }
+      },
+      "change_connection": {
+        "title": "Change Connection Type",
+        "description": "Current connection: **{current_connection}**\n\n**Local:** {local_address}\n**Remote:** {remote_address}",
+        "data": {
+          "connection_type": "Preferred Connection"
+        }
+      },
+      "select_connection": {
+        "title": "Connection Type",
+        "description": "Select how to connect to your IPCom.\n\n**Local:** {local_address}\n**Remote:** {remote_address}",
+        "data": {
+          "connection_type": "Preferred Connection"
+        }
+      }
+    },
+    "error": {
+      "cloud_auth_failed": "HomeAnywhere login failed - check username and password",
+      "cloud_connection_failed": "Could not connect to HomeAnywhere cloud",
+      "no_sites": "No sites found on your HomeAnywhere account",
+      "no_ipcoms": "No IPCom devices found on this site",
+      "fetch_config_failed": "Failed to fetch site configuration",
+      "no_addresses": "No connection addresses stored. Please use re-discovery instead.",
+      "unknown": "An unexpected error occurred"
     }
   }
 }

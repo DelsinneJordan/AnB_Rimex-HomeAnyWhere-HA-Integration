@@ -12,6 +12,25 @@ CONF_PORT = "port"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 
+# Cloud discovery configuration keys
+CONF_CLOUD_USERNAME = "cloud_username"
+CONF_CLOUD_PASSWORD = "cloud_password"
+CONF_SITE_ID = "site_id"
+CONF_SITE_NAME = "site_name"
+CONF_DEVICES = "devices"  # Stores discovered devices in config entry
+
+# Connection type configuration
+CONF_CONNECTION_TYPE = "connection_type"
+CONF_LOCAL_HOST = "local_host"
+CONF_LOCAL_PORT = "local_port"
+CONF_REMOTE_HOST = "remote_host"
+CONF_REMOTE_PORT = "remote_port"
+
+# Connection type values
+CONNECTION_TYPE_LOCAL = "local"
+CONNECTION_TYPE_REMOTE = "remote"
+CONNECTION_TYPE_BOTH = "both"  # Local preferred with remote fallback
+
 # Defaults
 DEFAULT_HOST = ""  # No default - user must provide their host
 DEFAULT_PORT = 5000
